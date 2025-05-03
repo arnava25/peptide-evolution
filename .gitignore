@@ -1,0 +1,21 @@
+# Ignore model binaries
+models/*.keras
+
+# Ignore large evolution logs or sensitive outputs
+data/master_evolution_history.csv
+data/master_evolution_clustered.csv
+data/mutation_rate_history.txt
+data/eval_known/eval_output_with_predictions.csv
+
+# Ignore training datasets that others must download themselves
+data/model_trainers/*.csv
+
+# Byte-compiled files / cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+
+# Backup files
+*~
