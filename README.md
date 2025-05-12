@@ -7,23 +7,7 @@ This repository contains the source code and minimal training data for the AMP e
 
 The framework uses evolutionary simulation, multi-objective scoring, and neural predictors to optimize de novo antimicrobial peptides under biochemical constraints.
 
-## Running the Simulation
-
-Install dependencies (Python 3.8+):
-
-```bash
-pip install -r requirements.txt
-```
-
-Run:
-
-```bash
-python scripts/evolve.py
-```
-
-Example outputs are saved to:
-
-- `data/top_20_simulated_peptides.csv`
+To run the simulation, first train the CNN models, then execute evolve.py for peptide generation and evaluation.
 
 ## Model Files
 
@@ -36,6 +20,26 @@ Pretrained models (`.keras`) are **not included** due to file size and licensing
 Minimal training datasets are included in:
 
 - `data/model_trainers/`
+
+Running these python files will automatically read the model_trainers datasets and generate the required models that will be called in evolve.py
+
+## Running the Simulation
+
+Install dependencies (Python 3.8+):
+
+```bash
+pip3 install -r requirements.txt
+```
+
+Run:
+
+```bash
+python3 scripts/evolve.py
+```
+
+Example outputs from are saved to:
+
+- `data/top_20_simulated_peptides.csv`
 
 ## License
 
