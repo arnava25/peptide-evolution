@@ -3,9 +3,14 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, callbacks
 from sklearn.model_selection import train_test_split
+import os
+
+# === Callbacks ===
+os.makedirs("models", exist_ok=True)
+os.makedirs("logs", exist_ok=True)
 
 # Load dataset
-df = pd.read_csv('data/stability_dataset_balanced.csv')
+df = pd.read_csv('data/model_trainers/stability_dataset_balanced.csv')
 
 amino_acids = list('ACDEFGHIKLMNPQRSTVWY')
 aa_to_int = {aa: idx+1 for idx, aa in enumerate(amino_acids)}

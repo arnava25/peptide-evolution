@@ -6,6 +6,10 @@ from sklearn.model_selection import train_test_split
 from collections import Counter
 import os
 
+# === Callbacks ===
+os.makedirs("models", exist_ok=True)
+os.makedirs("logs", exist_ok=True)
+
 # === Load AMP dataset ===
 df = pd.read_csv('data/model_trainers/amp_dataset.csv')
 
@@ -55,10 +59,6 @@ class_weight = {
     1: total / (2.0 * counts[1])
 }
 print(f"⚖️  Class weights: {class_weight}")
-
-# === Callbacks ===
-os.makedirs("models", exist_ok=True)
-os.makedirs("logs", exist_ok=True)
 
 checkpoint = callbacks.ModelCheckpoint('models/amp_model.keras', save_best_only=True, monitor='val_loss')
 earlystop = callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
