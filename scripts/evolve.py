@@ -5,6 +5,12 @@ import numpy as np
 import pandas as pd
 from tensorflow import keras
 from datetime import datetime
+import os
+
+# Ensure necessary directories exist
+os.makedirs('data/evolution_histories', exist_ok=True)
+os.makedirs('data/checkpoints', exist_ok=True)
+os.makedirs('outputs', exist_ok=True)
 
 def sequence_identity(seq1, seq2):
     """Calculates % identity between two sequences (simple)."""
