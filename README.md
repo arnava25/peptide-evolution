@@ -37,6 +37,17 @@ Run:
 python3 scripts/evolve.py
 ```
 
+Settings are set to the following by default:
+  initial population = 600
+  generations = 2000
+  peptide length = 25
+
+These can be changed in evolve.py. To safely terminate a long-running simulation without losing progress, you can trigger an early stop by creating a stop.txt file in the project root. In a separate window in the same directory run:
+
+  touch stop.txt
+
+This will signal the simulation to stop after the current generation finishes, save all logs and data, and exit cleanly.
+
 Example outputs from are saved to:
 
 - `data/top_20_simulated_peptides.csv`
