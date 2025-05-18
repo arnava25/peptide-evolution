@@ -16,10 +16,8 @@ MUTATION_HISTORY_FILE = 'data/mutation_rate_history.txt'
 
 EARLY_STOP_FILE = 'stop.txt'
 
-
 # 👁️ Attentional motif salience memory
 salient_motifs = {}  # Stores k-mers and their evolving salience values
-
 
 def check_early_stop():
     return os.path.exists(EARLY_STOP_FILE)
@@ -131,6 +129,34 @@ def estimate_aggregation_risk(peptide):
 
     return min(risk, 1.0)
 
+
+def heuristic_amp_score(peptide):
+    """Estimate AMP potential based on biophysical heuristics."""
+    charge = calculate_net_charge(peptide)
+    hydrophobicity = calculate_hydrophobicity(peptide)
+    solubility = estimate_solubility(peptide)
+    aggregation_risk = estimate_aggregation_risk(peptide)
+
+    score = 1.0
+
+    if 4 <= charge <= 8:
+        score *= 1.2
+    elif charge < 2 or charge > 10:
+        score *= 0.8
+
+    if 0.35 <= hydrophobicity <= 0.55:
+        score *= 1.2
+    elif hydrophobicity < 0.2 or hydrophobicity > 0.7:
+        score *= 0.8
+
+    if aggregation_risk > 0.5:
+        score *= 0.8
+
+    if solubility > 0.6:
+        score *= 1.1
+
+    return min(score, 1.0)
+
 def save_population(population):
     with open(CURRENT_POP_FILE, 'w') as f:
         for pep in population:
@@ -234,28 +260,29 @@ def score_peptide(peptide, amp_score, tox_score, stab_score, previous_peptides=N
             fitness *= 0.95
         elif min_sim < 0.5:
             fitness *= 1.05
-    
-    ## Compute expected fitness from model scores alone
-    expected_fitness = (amp_score + 1e-4) * (1 - tox_score + 1e-3) * (stab_score + 1e-3)
-    prediction_error = abs(fitness - expected_fitness)
+ 
 
-    # Reward surprising peptides
-    if 0.05 < prediction_error < 0.2:
-        fitness *= 1.05  # gentle reward for moderate surprise
-    elif prediction_error >= 0.2:
-        fitness *= 1.1  # stronger reward for big surprises
+    # 👁️ Corrected surprise score = difference between model AMP score and heuristic AMP estimate
+    heuristic_score = heuristic_amp_score(peptide)
+    surprise_score = abs(amp_score - heuristic_score)
 
-
-    # Curiosity index = novelty * surprise
+    # Novelty = inverse similarity to most similar in population
     novelty_score = 1 - max_sim
-    surprise_score = abs(hydrophobicity - 0.4)  # assume 0.4 is expected average
-
     curiosity_index = novelty_score * surprise_score
 
-    if 0.05 < curiosity_index < 0.2:
+    # Reward surprising sequences
+    if 0.05 < surprise_score < 0.2:
+        fitness *= 1.05
+    elif surprise_score >= 0.2:
         fitness *= 1.1
-    elif curiosity_index > 0.3:
-        fitness *= 0.95
+
+    # Reward high curiosity
+    if curiosity_index > 0.05:
+        fitness *= 1.05
+    if curiosity_index > 0.2:
+        fitness *= 1.1
+
+
 
 
     # === Final Quality Modifier ===
