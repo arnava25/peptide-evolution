@@ -5,6 +5,12 @@ import numpy as np
 import pandas as pd
 from tensorflow import keras
 from datetime import datetime
+import os
+
+# Ensure necessary directories exist
+os.makedirs('data/evolution_histories', exist_ok=True)
+os.makedirs('data/checkpoints', exist_ok=True)
+os.makedirs('outputs', exist_ok=True)
 
 def sequence_identity(seq1, seq2):
     """Calculates % identity between two sequences (simple)."""
@@ -15,9 +21,6 @@ CURRENT_POP_FILE = 'data/current_population.txt'
 MUTATION_HISTORY_FILE = 'data/mutation_rate_history.txt'
 
 EARLY_STOP_FILE = 'stop.txt'
-
-# 👁️ Attentional motif salience memory
-salient_motifs = {}  # Stores k-mers and their evolving salience values
 
 def check_early_stop():
     return os.path.exists(EARLY_STOP_FILE)
@@ -129,34 +132,6 @@ def estimate_aggregation_risk(peptide):
 
     return min(risk, 1.0)
 
-
-def heuristic_amp_score(peptide):
-    """Estimate AMP potential based on biophysical heuristics."""
-    charge = calculate_net_charge(peptide)
-    hydrophobicity = calculate_hydrophobicity(peptide)
-    solubility = estimate_solubility(peptide)
-    aggregation_risk = estimate_aggregation_risk(peptide)
-
-    score = 1.0
-
-    if 4 <= charge <= 8:
-        score *= 1.2
-    elif charge < 2 or charge > 10:
-        score *= 0.8
-
-    if 0.35 <= hydrophobicity <= 0.55:
-        score *= 1.2
-    elif hydrophobicity < 0.2 or hydrophobicity > 0.7:
-        score *= 0.8
-
-    if aggregation_risk > 0.5:
-        score *= 0.8
-
-    if solubility > 0.6:
-        score *= 1.1
-
-    return min(score, 1.0)
-
 def save_population(population):
     with open(CURRENT_POP_FILE, 'w') as f:
         for pep in population:
@@ -211,9 +186,6 @@ def score_peptide(peptide, amp_score, tox_score, stab_score, previous_peptides=N
     boman = calculate_boman_index(peptide)
     unique_aas = len(set(peptide))
 
-    max_sim = 0.0
-    min_sim = 1.0
-
     # Base fitness
     fitness = (amp_score + 1e-4) * (1 - tox_score + 1e-3) * (stab_score + 1e-3)
 
@@ -260,30 +232,6 @@ def score_peptide(peptide, amp_score, tox_score, stab_score, previous_peptides=N
             fitness *= 0.95
         elif min_sim < 0.5:
             fitness *= 1.05
- 
-
-    # 👁️ Corrected surprise score = difference between model AMP score and heuristic AMP estimate
-    heuristic_score = heuristic_amp_score(peptide)
-    surprise_score = abs(amp_score - heuristic_score)
-
-    # Novelty = inverse similarity to most similar in population
-    novelty_score = 1 - max_sim
-    curiosity_index = novelty_score * surprise_score
-
-    # Reward surprising sequences
-    if 0.05 < surprise_score < 0.2:
-        fitness *= 1.05
-    elif surprise_score >= 0.2:
-        fitness *= 1.1
-
-    # Reward high curiosity
-    if curiosity_index > 0.05:
-        fitness *= 1.05
-    if curiosity_index > 0.2:
-        fitness *= 1.1
-
-
-
 
     # === Final Quality Modifier ===
     quality_score = compute_quality_score(peptide)
@@ -364,17 +312,6 @@ def smart_mutate(peptide, mutation_rate):
             group = list(group - {aa})  # exclude self
             if group:
                 peptide[i] = random.choice(group)
-        
-    # Attention-based mutation (optional, 5% of the time)
-    if random.random() < 0.05 and len(peptide) > 3:
-        idx = random.randint(0, len(peptide) - 3)
-        motif = ''.join(peptide[idx:idx+3])
-        if salient_motifs.get(motif, 0) > 0.02:
-            # Attention bias: mutate within similar group
-            for j in range(3):
-                aa = peptide[idx + j]
-                group = aa_to_group.get(aa, amino_acids)
-                peptide[idx + j] = random.choice(group)
 
     return ''.join(peptide)
 
@@ -498,16 +435,6 @@ def append_generation_to_master(generation_number, generation_data):
         else:
             df.to_csv(f, header=False, index=False)
 
-
-def update_salient_motifs(peptide, fitness, decay=0.9):
-    """Update motif salience with decay based on fitness."""
-    k = 3  # motif length
-    for i in range(len(peptide) - k + 1):
-        motif = peptide[i:i+k]
-        prev = salient_motifs.get(motif, 0.0)
-        # Update: decay previous + reward (fitness-0.5 centered)
-        salient_motifs[motif] = prev * decay + 0.1 * (fitness - 0.5)
-
 def append_mutation_rate(generation_number, mutation_rate, stagnant_gen=None):
     with open(MUTATION_HISTORY_FILE, 'a') as f:
         if stagnant_gen is not None:
@@ -617,9 +544,6 @@ def run_simulation():
             tox = tox_scores[idx]
             stab = stab_scores[idx]
             amp, tox, stab, fitness, sol, agg, pI, boman, net_charge, hydrophobicity, sol_tag, agg_tag, realism_score = score_peptide(pep, amp, tox, stab, previous_peptides=population)
-            
-            update_salient_motifs(pep, fitness)
-
             if gen == 1 and idx < 5:
                 print(f"⚙️ AMP={amp:.2f}, TOX={tox:.2f}, STAB={stab:.2f}, FITNESS={fitness:.3f}")
 
@@ -629,6 +553,7 @@ def run_simulation():
                 net_charge, hydrophobicity, sol_tag, agg_tag,
                 fitness, realism_score, tag
 ))
+
         generation_df = pd.DataFrame(scores, columns=[
             'Peptide', 'AMP_Score', 'Toxicity_Score', 'Stability_Score',
             'Solubility_Score', 'Aggregation_Risk', 'Isoelectric_Point',
