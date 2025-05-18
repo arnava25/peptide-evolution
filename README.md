@@ -1,9 +1,11 @@
 # Peptide Evolution Framework
 
-This repository contains the source code and minimal training data for the AMP evolution system described in:
+The main branch contains the source code and minimal training data for the AMP evolution system described in:
 
 **A Realism-Constrained Framework for De Novo Antimicrobial Peptide Evolution via Multi-Objective Fitness**  
 (Arnav Amit, 2025)
+
+The dev branch includes cognition inspired heuristics in order to avoid convergence on local maxima.
 
 The framework uses evolutionary simulation, multi-objective scoring, and neural predictors to optimize de novo antimicrobial peptides under biochemical constraints.
 
