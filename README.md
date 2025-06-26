@@ -2,8 +2,9 @@
 
 The main branch contains the source code and minimal training data for the AMP evolution system described in:
 
-**A Realism-Constrained Framework for De Novo Antimicrobial Peptide Evolution via Multi-Objective Fitness**  
+**Multi-Objective Evolution of Antimicrobial Peptides Guided by Cognitive Principles and Realism Constraints**  
 (Arnav Amit, 2025)
+https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5313864
 
 The dev branch includes cognition inspired heuristics in order to avoid convergence on local maxima.
 
