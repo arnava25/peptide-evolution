@@ -8,6 +8,8 @@ https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5313864
 
 The dev branch includes cognition inspired heuristics in order to avoid convergence on local maxima.
 
+The agent branch includes most recent upgrades, including agentic goal shaping and dynamic motivation weighting.
+
 The framework uses evolutionary simulation, multi-objective scoring, and neural predictors to optimize de novo antimicrobial peptides under biochemical constraints.
 
 To run the simulation, first train the CNN models, then execute evolve.py for peptide generation and evaluation.
@@ -19,6 +21,7 @@ Pretrained models (`.keras`) are **not included** due to file size and licensing
 - `scripts/train_amp_model_v2.py`
 - `scripts/train_toxicity_model_v2.py`
 - `scripts/train_stability_model_v2.py`
+- `scripts/train_naturalness_model.py`
 
 Minimal training datasets are included in:
 
