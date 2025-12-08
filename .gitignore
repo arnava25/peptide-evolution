@@ -1,1 +1,12 @@
+cat << 'EOF' >> .gitignore
+
+# Local run outputs / big files
+data/
+*.csv
+*.tsv
+*.h5
+*.keras
+*.npz
+*.npy
+EOF
 .DS_Store
