@@ -1,5 +1,9 @@
-# Peptide Evolution Framework
 
+# What This Is
+Most antibiotics are failing. Drug-resistant bacteria kill millions annually. Finding new antimicrobial peptides (AMPs) (short proteins that can kill bacteria) is urgent but expensive in the lab.
+This framework uses deep learning and evolutionary algorithms to computationally design novel AMP candidates, filtering for effectiveness, low toxicity, and biochemical realism, BEFORE any lab work happens. It's a drug discovery acceleration tool.
+
+# Peptide Evolution Framework
 The main branch contains the source code and minimal training data for the AMP evolution system described in:
 
 **Multi-Objective Evolution of Antimicrobial Peptides Guided by Cognitive Principles and Realism Constraints**  
