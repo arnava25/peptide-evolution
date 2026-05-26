@@ -1924,9 +1924,52 @@ def run_simulation():
     # Initialize population
     population = load_population()
     if not population:
+        def load_apd_seeds(fasta_path, peptide_length=25, n=None):
+            seeds = []
+            with open(fasta_path) as f:
+                seq = ""
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(">"):
+                        if seq and len(seq) >= 10:
+                            seeds.append(seq)
+                        seq = ""
+                    else:
+                        seq += line
+                if seq and len(seq) >= 10:
+                    seeds.append(seq)
+            # Filter to valid amino acids only
+            valid = set('ACDEFGHIKLMNPQRSTVWY')
+            seeds = [s for s in seeds if all(c in valid for c in s)]
+            # Trim or pad to peptide_length
+            processed = []
+            for s in seeds:
+                if len(s) >= peptide_length:
+                    processed.append(s[:peptide_length])
+                else:
+                    # pad with random AAs
+                    pad = ''.join(random.choices(amino_acids, k=peptide_length - len(s)))
+                    processed.append(s + pad)
+            random.shuffle(processed)
+            if n:
+                processed = processed[:n]
+            return processed
 
-        population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
-        print(f"🌱 Created pure random population: {population_size} sequences.")
+        apd_path = 'data/apd_sequences.fasta'
+        if os.path.exists(apd_path):
+            apd_seeds = load_apd_seeds(apd_path, peptide_length=peptide_length, n=population_size)
+            if len(apd_seeds) >= population_size // 2:
+                # fill remainder with random if not enough APD sequences
+                remainder = population_size - len(apd_seeds)
+                randoms = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(remainder)]
+                population = apd_seeds + randoms
+                print(f"🌱 Seeded population: {len(apd_seeds)} APD sequences + {remainder} random.")
+            else:
+                population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
+                print(f"⚠️ Not enough APD sequences found, falling back to random population.")
+        else:
+            population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
+            print(f"🌱 No APD file found, created pure random population: {population_size} sequences.")
 
     else:
         print(f"🌟 Resuming from saved population with {len(population)} peptides.")
