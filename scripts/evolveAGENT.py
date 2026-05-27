@@ -1823,6 +1823,94 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
     return best_cand, best_reasons, best_source
 
 
+def pareto_dominates(a, b):
+    better_on_one = False
+    for key in ['amp', 'safety', 'stability']:
+        if a[key] < b[key]:
+            return False
+        if a[key] > b[key]:
+            better_on_one = True
+    return better_on_one
+
+def nsga2_select(generation_df, n_select):
+    """
+    NSGA-II selection: rank by Pareto dominance, break ties by crowding distance.
+    Returns a DataFrame of n_select survivors.
+    """
+    n = len(generation_df)
+    df = generation_df.reset_index(drop=True)
+
+    objectives = []
+    for _, row in df.iterrows():
+        objectives.append({
+            'amp': float(row['AMP_Score']),
+            'safety': float(1.0 - row['Toxicity_Score']),
+            'stability': float(row['Stability_Score']),
+        })
+
+    # Pareto ranking
+    domination_count = [0] * n
+    dominated_set = [[] for _ in range(n)]
+
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            if pareto_dominates(objectives[j], objectives[i]):
+                domination_count[i] += 1
+            if pareto_dominates(objectives[i], objectives[j]):
+                dominated_set[i].append(j)
+
+    fronts = []
+    current_front = [i for i in range(n) if domination_count[i] == 0]
+
+    while current_front:
+        fronts.append(current_front)
+        next_front = []
+        for i in current_front:
+            for j in dominated_set[i]:
+                domination_count[j] -= 1
+                if domination_count[j] == 0:
+                    next_front.append(j)
+        current_front = next_front
+
+    # Crowding distance
+    crowding = [0.0] * n
+    for front in fronts:
+        if len(front) <= 2:
+            for i in front:
+                crowding[i] = float('inf')
+            continue
+        for key in ['amp', 'safety', 'stability']:
+            sorted_front = sorted(front, key=lambda i: objectives[i][key])
+            crowding[sorted_front[0]] = float('inf')
+            crowding[sorted_front[-1]] = float('inf')
+            obj_range = objectives[sorted_front[-1]][key] - objectives[sorted_front[0]][key]
+            if obj_range == 0:
+                continue
+            for k in range(1, len(sorted_front) - 1):
+                crowding[sorted_front[k]] += (
+                    objectives[sorted_front[k+1]][key] - objectives[sorted_front[k-1]][key]
+                ) / obj_range
+
+    # Assign rank and crowding to df
+    rank_map = {}
+    for rank, front in enumerate(fronts):
+        for i in front:
+            rank_map[i] = rank
+
+    df['Pareto_Rank'] = [rank_map.get(i, 999) for i in range(n)]
+    df['Crowding_Distance'] = crowding
+
+    # Select by rank then crowding distance
+    df_sorted = df.sort_values(
+        by=['Pareto_Rank', 'Crowding_Distance'],
+        ascending=[True, False]
+    )
+
+    return df_sorted.head(n_select)
+
+
 
 def run_simulation():
 
@@ -1871,7 +1959,7 @@ def run_simulation():
     # Similarity log path (unique per run)
     os.makedirs('data/similarity_logs', exist_ok=True)
     _agent_label = "AGENT_ON" if USE_AGENT else "AGENT_OFF"
-    RUN_TAG = run_start_time.strftime('%Y%m%d_%H%M') + f"_{_agent_label}"
+    RUN_TAG = run_start_time.strftime('%Y%m%d_%H%M') + "_PARETO"
     SIMILARITY_LOG_PATH = f"data/similarity_logs/similarity_log_{RUN_TAG}.csv"
     print(f"🏷️  Run tag: {RUN_TAG}")
 
@@ -2315,35 +2403,25 @@ def run_simulation():
             index=False
         )
 
+        # NSGA-II selection
+        n_select = population_size // 2
+        try:
+            filtered_df = nsga2_select(generation_df, n_select)
+            front0_count = (filtered_df['Pareto_Rank'] == 0).sum()
+            print(f"🧬 NSGA-II: {front0_count} Pareto front-0 survivors selected.")
+        except Exception as e:
+            print(f"⚠️ NSGA-II failed ({e}), falling back to fitness ranking.")
+            filtered_df = generation_df.sort_values(
+                by="Fitness_Score", ascending=False
+            ).head(population_size // 2)
 
-        # Sort population globally
-        sorted_df = generation_df.sort_values(by="Fitness_Score", ascending=False)
-
-        n = len(sorted_df)
-
-        top_cut   = int(0.30 * n)   # top 30% fully eligible
-        mid_cut   = int(0.70 * n)   # next 40% eligible but down-weighted
-
-        top_df = sorted_df.iloc[:top_cut]
-        mid_df = sorted_df.iloc[top_cut:mid_cut]
-        low_df = sorted_df.iloc[mid_cut:]
-
-        # survival probabilities by tier
-        top_df = top_df.sample(frac=1.0)            # keep all
-        mid_df = mid_df.sample(frac=0.40)           # keep ~40% of mid-tier
-        low_df = low_df.sample(frac=0.10)           # keep 10% bottom-tier
-
-        filtered_df = pd.concat([top_df, mid_df, low_df])
-
-
-        # ✅ SAFETY: ensure minimum survivors
+        # Safety
         min_survivors = population_size // 4
         if len(filtered_df) < min_survivors:
             print(f"⚠️ Too few survivors ({len(filtered_df)}). Falling back to top-{min_survivors} by fitness.")
             filtered_df = generation_df.sort_values(
                 by="Fitness_Score", ascending=False
             ).head(min_survivors)
-
 
         # 🧠 Agent adapts motives + meta-cognition (agent only)
         if USE_AGENT and agent is not None:
