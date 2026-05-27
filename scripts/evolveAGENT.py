@@ -2065,6 +2065,12 @@ def run_simulation():
     trait_log_path = f"data/trait_stats/trait_stats_{RUN_TAG}.csv"
     THIS_RUN_FILE = f"data/evolution_histories/evolution_run_{RUN_TAG}.csv"
 
+
+
+
+
+
+
     # Initialize population
     population = load_population()
     if not population:
@@ -2082,16 +2088,13 @@ def run_simulation():
                         seq += line
                 if seq and len(seq) >= 10:
                     seeds.append(seq)
-            # Filter to valid amino acids only
             valid = set('ACDEFGHIKLMNPQRSTVWY')
             seeds = [s for s in seeds if all(c in valid for c in s)]
-            # Trim or pad to peptide_length
             processed = []
             for s in seeds:
                 if len(s) >= peptide_length:
                     processed.append(s[:peptide_length])
                 else:
-                    # pad with random AAs
                     pad = ''.join(random.choices(amino_acids, k=peptide_length - len(s)))
                     processed.append(s + pad)
             random.shuffle(processed)
@@ -2100,23 +2103,42 @@ def run_simulation():
             return processed
 
         apd_path = 'data/apd_sequences.fasta'
-        if os.path.exists(apd_path):
+        apd_available = os.path.exists(apd_path)
+
+        print("\n🧬 Population initialization:")
+        print("  1. APD-seeded (natural AMP scaffolds)" + (" [available]" if apd_available else " [APD file not found]"))
+        print("  2. Random (fully random sequences)")
+        if apd_available:
+            print("  3. Partial (50% APD + 50% random)")
+        choice = input("Select initialization [1/2/3, default=1]: ").strip()
+        if choice == "" :
+            choice = "1"
+
+        if choice == "1" and apd_available:
             apd_seeds = load_apd_seeds(apd_path, peptide_length=peptide_length, n=population_size)
             if len(apd_seeds) >= population_size // 2:
-                # fill remainder with random if not enough APD sequences
                 remainder = population_size - len(apd_seeds)
                 randoms = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(remainder)]
                 population = apd_seeds + randoms
                 print(f"🌱 Seeded population: {len(apd_seeds)} APD sequences + {remainder} random.")
             else:
                 population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
-                print(f"⚠️ Not enough APD sequences found, falling back to random population.")
+                print(f"⚠️ Not enough APD sequences, falling back to random.")
+        elif choice == "3" and apd_available:
+            half = population_size // 2
+            apd_seeds = load_apd_seeds(apd_path, peptide_length=peptide_length, n=half)
+            randoms = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size - len(apd_seeds))]
+            population = apd_seeds + randoms
+            print(f"🌱 Partial seed: {len(apd_seeds)} APD + {len(randoms)} random.")
         else:
             population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
-            print(f"🌱 No APD file found, created pure random population: {population_size} sequences.")
+            print(f"🌱 Random population: {population_size} sequences.")
 
-    else:
-        print(f"🌟 Resuming from saved population with {len(population)} peptides.")
+
+
+
+
+
 
     # Mark a new run in mutation history
     with open(MUTATION_HISTORY_FILE, 'a') as f:
