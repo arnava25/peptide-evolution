@@ -2032,11 +2032,10 @@ def run_simulation():
             stab_int = float(stab_scores[idx])
 
             # 🔗 External model: PyAMPA
+
             try:
                 py = pyampa_scores(pep)
-            except Exception as e:
-                # If anything goes wrong, fall back to "no external info"
-                print(f"⚠️ PyAMPA failed for {pep}: {e}")
+            except Exception:
                 py = {"amp": amp_int, "tox": tox_int, "hemolysis": 0.0, "cpp": 0.0}
 
             # Core scoring (Agent motives + PyAMPA-blended scores)
