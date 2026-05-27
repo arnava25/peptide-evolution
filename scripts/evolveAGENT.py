@@ -377,7 +377,7 @@ USE_AGENT = True          # True = agent ON (cognitive evolution)
 
 # Settings
 amino_acids = list('ACDEFGHIKLMNPQRSTVWY')
-population_size = 150
+population_size = 300
 generations = 2000
 peptide_length = 25
 max_len = 50
@@ -534,8 +534,7 @@ def score_peptide(
         w_novel  = agent.w[m.index("novelty")]
         w_quality = 0.5 * (w_amp + w_safety)
     else:
-        w_amp, w_safety, w_stab, w_quality, w_novel, w_real = 0.35, 0.25, 0.20, 0.10, 0.10, 0.10  
-
+        w_amp, w_safety, w_stab, w_quality, w_novel, w_real = 0.38, 0.27, 0.22, 0.11, 0.12, 0.0
 
     weights = np.array([w_amp, w_safety, w_stab, w_quality, w_novel, w_real], dtype=float)
     weights = weights / weights.sum()
@@ -565,9 +564,9 @@ def score_peptide(
     x = _clamp(x, -60.0, 60.0)
     fitness = 1.0 / (1.0 + math.exp(-x))
 
-    # --- Diversity bonus ---
-    diversity_bonus = novelty * 0.1
-    fitness = float(_clamp(fitness + diversity_bonus, 0.0, 1.0))
+
+    # novelty already included in weighted sum above
+    fitness = float(_clamp(fitness, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
     agg_tag = "✅ Safe" if aggregation_risk <= 0.5 else "🔴 Risky"
@@ -2172,7 +2171,7 @@ def run_simulation():
         mean_H, max_H = compute_population_entropy(population)
 
         # 🛡️ Early convergence guard: if population collapses too soon, inject exploration
-        if gen < 30 and avg_sim > 0.35:
+        if gen < 30 and avg_sim > 0.55:
             print(f"⚠️ Early convergence detected (avg_sim={avg_sim:.3f}) — injecting exploratory peptides.")
             extra = [
                 ''.join(random.choices(amino_acids, k=peptide_length))
@@ -2563,7 +2562,7 @@ def run_simulation():
                 f2 = generation_df[generation_df['Peptide'] == p2]['Fitness_Score'].values
 
                 if f1.size > 0 and f2.size > 0:
-                    if child_fitness >= 0.8 * max(f1[0], f2[0]) and is_realistic(child, gen):
+                    if child_fitness >= 0.65 * max(f1[0], f2[0]) and is_realistic(child, gen):
                         new_population.append(child)
                         with open(ACTION_LOG, 'a') as f:
                             f.write(f"{gen},crossover\n")
