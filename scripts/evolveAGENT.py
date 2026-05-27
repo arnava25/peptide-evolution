@@ -28,7 +28,6 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
-from external.pyampa_integration import pyampa_scores
 
 def _clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
@@ -494,28 +493,11 @@ def score_peptide(
         except Exception:
             pass # Safety pass if model fails
 
-    # --- Optional PyAMPA calibration + ensemble disagreement penalty ---
-    if pyamp is not None:
-        ext_amp = float(pyamp.get("amp", amp_score))
-        ext_tox = float(pyamp.get("tox", tox_score))
-        ext_hem = float(pyamp.get("hemolysis", 0.0))
 
-        # Disagreement between internal CNN and PyAMPA on AMP and toxicity
-        amp_disagreement = abs(amp_score - ext_amp)
-        tox_disagreement = abs(tox_score - ext_tox)
-        consensus_disagreement = (amp_disagreement + tox_disagreement) / 2.0
+    disagreement_penalty = 0.0
 
-        # Soft blend — weighted toward internal model (70/30)
-        amp_score = 0.7 * amp_score + 0.3 * ext_amp
-        tox_blend = 0.7 * tox_score + 0.3 * ext_tox
-        tox_score = min(1.0, 0.5 * tox_blend + 0.5 * ext_hem)
 
-        # Ensemble disagreement penalty: when models strongly disagree (>0.3),
-        # we can't trust either score — penalize fitness to be conservative.
-        # Penalty is 0 when disagreement < 0.15, rises to 0.15 at disagreement = 0.5
-        disagreement_penalty = _clamp((consensus_disagreement - 0.15) / 0.35, 0.0, 1.0) * 0.15
-    else:
-        disagreement_penalty = 0.0
+
 
     # --- Novelty term ---
     if archive_kmers is None:
@@ -2121,13 +2103,10 @@ def run_simulation():
             tox_int = float(tox_scores[idx])
             stab_int = float(stab_scores[idx])
 
-            # 🔗 External model: PyAMPA
 
-            try:
-                py = pyampa_scores(pep)
-            except Exception:
-                py = {"amp": amp_int, "tox": tox_int, "hemolysis": 0.0, "cpp": 0.0}
 
+            py = None
+            
             # Core scoring (Agent motives + PyAMPA-blended scores)
             amp, tox, stab, fitness, sol, agg, pI, boman, net_charge, hydrophobicity, sol_tag, agg_tag, realism_score, hydro_moment = score_peptide(
                 pep,
@@ -2139,9 +2118,8 @@ def run_simulation():
             )
 
 
-            # Surprise = disagreement between internal CNNs and PyAMPA
-            surprise_amp = abs(amp_int - float(py.get("amp", amp_int)))
-            surprise_tox = abs(tox_int - float(py.get("tox", tox_int)))
+            surprise_amp = 0.0
+            surprise_tox = 0.0
 
             update_salient_motifs(pep, fitness)
 
