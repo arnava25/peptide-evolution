@@ -536,18 +536,15 @@ def score_peptide(
 
     gated = value * structure_bonus * turing_bonus
 
-    # Apply ensemble disagreement penalty before compression
-    gated = _clamp(gated - disagreement_penalty, 0.0, 1.0)
+
+    gated = max(0.0, gated - disagreement_penalty)
 
     # --- Logistic compression ---
     beta = 2.5
-    bias = 0.5
+    bias = 0.4
     x = beta * (gated - bias)
     x = _clamp(x, -60.0, 60.0)
     fitness = 1.0 / (1.0 + math.exp(-x))
-
-
-    # novelty already included in weighted sum above
     fitness = float(_clamp(fitness, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
