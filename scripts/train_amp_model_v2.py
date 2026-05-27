@@ -11,7 +11,7 @@ os.makedirs("models", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
 # === Load AMP dataset ===
-df = pd.read_csv('data/model_trainers/amp_dataset.csv')
+df = pd.read_csv('data/model_trainers/amp_dataset_v3.csv')
 
 assert 'Sequence' in df.columns and 'Label' in df.columns, "CSV must have 'Sequence' and 'Label' columns."
 
