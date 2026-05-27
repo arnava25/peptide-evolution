@@ -1609,6 +1609,32 @@ def novelty_vs_archive(seq: str, archive_kmers: list[set], k: int = 3, sample_n:
     return float(1.0 - best_sim)
 
 
+def novelty_vs_apd(seq: str, apd_kmers: list[set], k: int = 3) -> float:
+    """
+    Returns novelty in [0,1] as 1 - max_jaccard_sim to APD sequences.
+    High = genuinely novel vs known natural AMPs.
+    Low = similar to a known natural AMP.
+    """
+    if not apd_kmers:
+        return 0.5
+    S = kmer_set(seq, k)
+    if not S:
+        return 0.5
+    best_sim = 0.0
+    # sample 200 APD sequences for speed
+    sample = random.sample(apd_kmers, min(200, len(apd_kmers)))
+    for T in sample:
+        if not T:
+            continue
+        inter = len(S & T)
+        union = len(S | T)
+        sim = inter / union if union else 0.0
+        if sim > best_sim:
+            best_sim = sim
+            if best_sim >= 0.98:
+                break
+    return float(1.0 - best_sim)
+
 def _estimate_deltas_batch(
     candidates: list[str],
     amp_model, tox_model, stab_model,
@@ -1824,7 +1850,7 @@ def pareto_dominates_4obj(a, b, keys):
             better_on_one = True
     return better_on_one
 
-def nsga2_select(generation_df, n_select, archive_kmers_ref=None):
+def nsga2_select(generation_df, n_select, archive_kmers_ref=None, apd_kmers_ref=None):
     """
     NSGA-II selection with 4 objectives: AMP, safety, stability, novelty.
     Novelty = inverse k-mer similarity to archive (sequence-level diversity).
@@ -1834,13 +1860,13 @@ def nsga2_select(generation_df, n_select, archive_kmers_ref=None):
 
     # Compute novelty per sequence
     seqs = df['Peptide'].tolist()
-    if archive_kmers_ref is not None and len(archive_kmers_ref) > 0:
-        novelty_scores = [
-            novelty_vs_archive(s, archive_kmers_ref, k=ARCHIVE_K, sample_n=ARCHIVE_SAMPLE_N)
-            for s in seqs
-        ]
-    else:
-        novelty_scores = [0.5] * n
+
+    novelty_scores = []
+    for s in seqs:
+        run_nov = novelty_vs_archive(s, archive_kmers_ref, k=ARCHIVE_K, sample_n=ARCHIVE_SAMPLE_N) if archive_kmers_ref else 0.5
+        apd_nov = novelty_vs_apd(s, apd_kmers_ref) if apd_kmers_ref else 0.5
+        # blend: 50% vs run archive, 50% vs APD database
+        novelty_scores.append(0.5 * run_nov + 0.5 * apd_nov)
 
     objectives = []
     for i, (_, row) in enumerate(df.iterrows()):
@@ -1932,6 +1958,28 @@ def run_simulation():
     stability_model = keras.models.load_model('models/stability_cnn_model.keras', compile=False)
     naturalness_model = keras.models.load_model('models/naturalness_discriminator.keras')
     print("✅ Models loaded: AMP, Toxicity, Stability, Naturalness Discriminator")
+
+
+    # Precompute APD kmer sets for novelty-vs-APD objective
+    apd_kmers = []
+    apd_path = 'data/apd_sequences.fasta'
+    if os.path.exists(apd_path):
+        _valid = set('ACDEFGHIKLMNPQRSTVWY')
+        _seq = ""
+        with open(apd_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line.startswith(">"):
+                    if _seq and all(c in _valid for c in _seq):
+                        apd_kmers.append(kmer_set(_seq, ARCHIVE_K))
+                    _seq = ""
+                else:
+                    _seq += _line
+            if _seq and all(c in _valid for c in _seq):
+                apd_kmers.append(kmer_set(_seq, ARCHIVE_K))
+        print(f"🧬 APD novelty reference loaded: {len(apd_kmers)} sequences")
+    else:
+        print("⚠️ APD FASTA not found, novelty-vs-APD disabled")
 
     # 🔮 Prophet mutation model (learned from past runs)
     if USE_AGENT:
@@ -2407,7 +2455,7 @@ def run_simulation():
         # NSGA-II selection
         n_select = population_size // 2
         try:
-            filtered_df = nsga2_select(generation_df, n_select, archive_kmers_ref=list(archive_kmers))
+            filtered_df = nsga2_select(generation_df, n_select, archive_kmers_ref=list(archive_kmers), apd_kmers_ref=apd_kmers)
             front0_count = (filtered_df['Pareto_Rank'] == 0).sum()
             print(f"🧬 NSGA-II: {front0_count} Pareto front-0 survivors selected.")
         except Exception as e:
