@@ -559,12 +559,15 @@ def score_peptide(
     gated = _clamp(gated - disagreement_penalty, 0.0, 1.0)
 
     # --- Logistic compression ---
-    beta = 6.0
+    beta = 2.5
     bias = 0.5
     x = beta * (gated - bias)
     x = _clamp(x, -60.0, 60.0)
     fitness = 1.0 / (1.0 + math.exp(-x))
 
+    # --- Diversity bonus ---
+    diversity_bonus = novelty * 0.1
+    fitness = float(_clamp(fitness + diversity_bonus, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
     agg_tag = "✅ Safe" if aggregation_risk <= 0.5 else "🔴 Risky"
