@@ -1814,21 +1814,44 @@ def pareto_dominates(a, b):
             better_on_one = True
     return better_on_one
 
-def nsga2_select(generation_df, n_select):
+
+def pareto_dominates_4obj(a, b, keys):
+    better_on_one = False
+    for key in keys:
+        if a[key] < b[key]:
+            return False
+        if a[key] > b[key]:
+            better_on_one = True
+    return better_on_one
+
+def nsga2_select(generation_df, n_select, archive_kmers_ref=None):
     """
-    NSGA-II selection: rank by Pareto dominance, break ties by crowding distance.
-    Returns a DataFrame of n_select survivors.
+    NSGA-II selection with 4 objectives: AMP, safety, stability, novelty.
+    Novelty = inverse k-mer similarity to archive (sequence-level diversity).
     """
     n = len(generation_df)
     df = generation_df.reset_index(drop=True)
 
+    # Compute novelty per sequence
+    seqs = df['Peptide'].tolist()
+    if archive_kmers_ref is not None and len(archive_kmers_ref) > 0:
+        novelty_scores = [
+            novelty_vs_archive(s, archive_kmers_ref, k=ARCHIVE_K, sample_n=ARCHIVE_SAMPLE_N)
+            for s in seqs
+        ]
+    else:
+        novelty_scores = [0.5] * n
+
     objectives = []
-    for _, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows()):
         objectives.append({
             'amp': float(row['AMP_Score']),
             'safety': float(1.0 - row['Toxicity_Score']),
             'stability': float(row['Stability_Score']),
+            'novelty': float(novelty_scores[i]),
         })
+
+    obj_keys = ['amp', 'safety', 'stability', 'novelty']
 
     # Pareto ranking
     domination_count = [0] * n
@@ -1838,9 +1861,9 @@ def nsga2_select(generation_df, n_select):
         for j in range(n):
             if i == j:
                 continue
-            if pareto_dominates(objectives[j], objectives[i]):
+            if pareto_dominates_4obj(objectives[j], objectives[i], obj_keys):
                 domination_count[i] += 1
-            if pareto_dominates(objectives[i], objectives[j]):
+            if pareto_dominates_4obj(objectives[i], objectives[j], obj_keys):
                 dominated_set[i].append(j)
 
     fronts = []
@@ -1856,14 +1879,14 @@ def nsga2_select(generation_df, n_select):
                     next_front.append(j)
         current_front = next_front
 
-    # Crowding distance
+    # Crowding distance across all 4 objectives
     crowding = [0.0] * n
     for front in fronts:
         if len(front) <= 2:
             for i in front:
                 crowding[i] = float('inf')
             continue
-        for key in ['amp', 'safety', 'stability']:
+        for key in obj_keys:
             sorted_front = sorted(front, key=lambda i: objectives[i][key])
             crowding[sorted_front[0]] = float('inf')
             crowding[sorted_front[-1]] = float('inf')
@@ -1875,7 +1898,6 @@ def nsga2_select(generation_df, n_select):
                     objectives[sorted_front[k+1]][key] - objectives[sorted_front[k-1]][key]
                 ) / obj_range
 
-    # Assign rank and crowding to df
     rank_map = {}
     for rank, front in enumerate(fronts):
         for i in front:
@@ -1884,13 +1906,15 @@ def nsga2_select(generation_df, n_select):
     df['Pareto_Rank'] = [rank_map.get(i, 999) for i in range(n)]
     df['Crowding_Distance'] = crowding
 
-    # Select by rank then crowding distance
     df_sorted = df.sort_values(
         by=['Pareto_Rank', 'Crowding_Distance'],
         ascending=[True, False]
     )
 
     return df_sorted.head(n_select)
+
+
+
 
 
 
@@ -2383,7 +2407,7 @@ def run_simulation():
         # NSGA-II selection
         n_select = population_size // 2
         try:
-            filtered_df = nsga2_select(generation_df, n_select)
+            filtered_df = nsga2_select(generation_df, n_select, archive_kmers_ref=list(archive_kmers))
             front0_count = (filtered_df['Pareto_Rank'] == 0).sum()
             print(f"🧬 NSGA-II: {front0_count} Pareto front-0 survivors selected.")
         except Exception as e:
