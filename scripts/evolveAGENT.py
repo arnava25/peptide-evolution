@@ -2129,15 +2129,14 @@ def run_simulation():
                 pep, amp, tox, stab, sol, agg, pI, boman,
                 net_charge, hydrophobicity, sol_tag, agg_tag,
                 fitness, realism_score, tag,
-                float(py.get("amp", 0.0)),
-                float(py.get("tox", 0.0)),
-                float(py.get("hemolysis", 0.0)),
-                float(py.get("cpp", 0.0)),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
                 surprise_amp,
                 surprise_tox,
-                hydro_moment,  # <-- NEW
+                hydro_moment,
             ))
-
 
         generation_df = pd.DataFrame(scores, columns=[
             'Peptide',
