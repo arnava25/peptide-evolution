@@ -62,7 +62,8 @@ archive_queue = deque(maxlen=ARCHIVE_MAX)   # deque[str]
 
 world_model = None
 naturalness_model = None 
-prophet_model = None   # 🔮 guides mutation choices
+prophet_model = None
+mic_model = None
 pwm_buffer = []
 PWM_BUFFER_MAX = 30000   # max training samples to keep
 PWM_BATCH_SIZE = 256
@@ -443,7 +444,23 @@ def _chaotic_choice_from_probs(probs: np.ndarray, agent) -> int:
         idx = len(probs) - 1
     return idx
 
-
+def predict_mic_score(peptide: str) -> float:
+    """
+    Returns a 0-1 score where higher = lower predicted MIC = more potent.
+    Uses log10 MIC prediction, sigmoid-transformed.
+    """
+    global mic_model
+    if mic_model is None:
+        return 0.5
+    try:
+        x = encode_int(peptide, max_len=max_len).reshape(1, -1)
+        log_mic = float(mic_model.predict(x, verbose=0)[0][0])
+        # sigmoid centered at log10(10) = 1.0
+        # score ~0.9 at MIC=0.1, ~0.5 at MIC=10, ~0.1 at MIC=100
+        score = 1.0 / (1.0 + math.exp(log_mic - 1.0))
+        return float(_clamp(score, 0.0, 1.0))
+    except Exception:
+        return 0.5
 
 def score_peptide(
     peptide,
@@ -757,9 +774,11 @@ def append_generation_to_master(generation_number, generation_data):
         'Solubility_Tag', 'Aggregation_Tag',
         'Fitness_Score', 'Realism_Score', 'Quality_Tag',
         'PyAMPA_AMP', 'PyAMPA_Toxicity', 'PyAMPA_Hemolysis', 'PyAMPA_CPP',
-        'Surprise_AMP', 'Surprise_Toxicity',
-        'Hydrophobic_Moment',  # <-- NEW
+        'Surprise_AMP', 'Surprise_Toxicity',        
+        'Hydrophobic_Moment',
+        'MIC_Score',
     ]
+
 
 
     # 🛡️ This ensures both presence and ORDER of columns
@@ -1828,14 +1847,7 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
     return best_cand, best_reasons, best_source
 
 
-def pareto_dominates(a, b):
-    better_on_one = False
-    for key in ['amp', 'safety', 'stability']:
-        if a[key] < b[key]:
-            return False
-        if a[key] > b[key]:
-            better_on_one = True
-    return better_on_one
+
 
 
 def pareto_dominates_4obj(a, b, keys):
@@ -1847,96 +1859,66 @@ def pareto_dominates_4obj(a, b, keys):
             better_on_one = True
     return better_on_one
 
-def nsga2_select(generation_df, n_select, archive_kmers_ref=None, apd_kmers_ref=None):
+
+# ============================================================
+# 🗺️ MAP-Elites Grid
+# ============================================================
+
+# Grid axes: net charge (-2 to 12, step 1) x hydrophobicity (0.1 to 0.75, step 0.05)
+CHARGE_BINS = list(range(-2, 13))          # -2,-1,0,1,...,12  → 15 bins
+HYDRO_BINS  = [round(x * 0.05, 2) for x in range(2, 16)]  # 0.10,0.15,...,0.75 → 14 bins
+
+def get_cell(peptide: str):
+    """Return (charge_bin, hydro_bin) grid indices for a peptide."""
+    charge = calculate_net_charge(peptide)
+    hydro  = calculate_hydrophobicity(peptide)
+
+    # clamp to grid bounds
+    charge = max(CHARGE_BINS[0], min(CHARGE_BINS[-1], charge))
+    hydro  = max(HYDRO_BINS[0],  min(HYDRO_BINS[-1],  hydro))
+
+    # nearest bin
+    ci = min(range(len(CHARGE_BINS)), key=lambda i: abs(CHARGE_BINS[i] - charge))
+    hi = min(range(len(HYDRO_BINS)),  key=lambda i: abs(HYDRO_BINS[i]  - hydro))
+    return ci, hi
+
+def map_elites_update(grid: dict, peptide: str, fitness: float) -> bool:
     """
-    NSGA-II selection with 4 objectives: AMP, safety, stability, novelty.
-    Novelty = inverse k-mer similarity to archive (sequence-level diversity).
+    Try to insert peptide into the grid.
+    Returns True if it improved the cell.
+    grid keys: (ci, hi), values: (fitness, peptide)
     """
-    n = len(generation_df)
-    df = generation_df.reset_index(drop=True)
+    ci, hi = get_cell(peptide)
+    key = (ci, hi)
+    if key not in grid or fitness > grid[key][0]:
+        grid[key] = (fitness, peptide)
+        return True
+    return False
 
-    # Compute novelty per sequence
-    seqs = df['Peptide'].tolist()
+def map_elites_sample(grid: dict, n: int) -> list[str]:
+    """
+    Sample n peptides from the grid for reproduction.
+    Bias toward lower-fitness cells to encourage exploration.
+    """
+    if not grid:
+        return []
+    keys = list(grid.keys())
+    fitnesses = np.array([grid[k][0] for k in keys])
+    # inverse-fitness weighting: lower fitness cells get sampled more
+    inv = 1.0 / (fitnesses + 1e-6)
+    weights = inv / inv.sum()
+    chosen = np.random.choice(len(keys), size=min(n, len(keys)),
+                              replace=True, p=weights)
+    return [grid[keys[i]][1] for i in chosen]
 
-    novelty_scores = []
-    for s in seqs:
-        run_nov = novelty_vs_archive(s, archive_kmers_ref, k=ARCHIVE_K, sample_n=ARCHIVE_SAMPLE_N) if archive_kmers_ref else 0.5
-        apd_nov = novelty_vs_apd(s, apd_kmers_ref) if apd_kmers_ref else 0.5
-        # blend: 50% vs run archive, 50% vs APD database
-        novelty_scores.append(0.5 * run_nov + 0.5 * apd_nov)
-
-    objectives = []
-    for i, (_, row) in enumerate(df.iterrows()):
-        objectives.append({
-            'amp': float(row['AMP_Score']),
-            'safety': float(1.0 - row['Toxicity_Score']),
-            'stability': float(row['Stability_Score']),
-            'novelty': float(novelty_scores[i]),
-        })
-
-    obj_keys = ['amp', 'safety', 'stability', 'novelty']
-
-    # Pareto ranking
-    domination_count = [0] * n
-    dominated_set = [[] for _ in range(n)]
-
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            if pareto_dominates_4obj(objectives[j], objectives[i], obj_keys):
-                domination_count[i] += 1
-            if pareto_dominates_4obj(objectives[i], objectives[j], obj_keys):
-                dominated_set[i].append(j)
-
-    fronts = []
-    current_front = [i for i in range(n) if domination_count[i] == 0]
-
-    while current_front:
-        fronts.append(current_front)
-        next_front = []
-        for i in current_front:
-            for j in dominated_set[i]:
-                domination_count[j] -= 1
-                if domination_count[j] == 0:
-                    next_front.append(j)
-        current_front = next_front
-
-    # Crowding distance across all 4 objectives
-    crowding = [0.0] * n
-    for front in fronts:
-        if len(front) <= 2:
-            for i in front:
-                crowding[i] = float('inf')
-            continue
-        for key in obj_keys:
-            sorted_front = sorted(front, key=lambda i: objectives[i][key])
-            crowding[sorted_front[0]] = float('inf')
-            crowding[sorted_front[-1]] = float('inf')
-            obj_range = objectives[sorted_front[-1]][key] - objectives[sorted_front[0]][key]
-            if obj_range == 0:
-                continue
-            for k in range(1, len(sorted_front) - 1):
-                crowding[sorted_front[k]] += (
-                    objectives[sorted_front[k+1]][key] - objectives[sorted_front[k-1]][key]
-                ) / obj_range
-
-    rank_map = {}
-    for rank, front in enumerate(fronts):
-        for i in front:
-            rank_map[i] = rank
-
-    df['Pareto_Rank'] = [rank_map.get(i, 999) for i in range(n)]
-    df['Crowding_Distance'] = crowding
-
-    df_sorted = df.sort_values(
-        by=['Pareto_Rank', 'Crowding_Distance'],
-        ascending=[True, False]
-    )
-
-    return df_sorted.head(n_select)
-
-
+def map_elites_stats(grid: dict) -> tuple:
+    """Returns (n_filled, total_cells, mean_fitness, max_fitness)."""
+    total = len(CHARGE_BINS) * len(HYDRO_BINS)
+    filled = len(grid)
+    if not grid:
+        return filled, total, 0.0, 0.0
+    fits = [v[0] for v in grid.values()]
+    return filled, total, float(np.mean(fits)), float(np.max(fits))
 
 
 
@@ -1953,8 +1935,16 @@ def run_simulation():
     amp_model = keras.models.load_model('models/amp_model.keras', compile=False)
     toxicity_model = keras.models.load_model('models/toxicity_cnn_model.keras', compile=False)
     stability_model = keras.models.load_model('models/stability_cnn_model.keras', compile=False)
+
+
     naturalness_model = keras.models.load_model('models/naturalness_discriminator.keras')
-    print("✅ Models loaded: AMP, Toxicity, Stability, Naturalness Discriminator")
+    global mic_model
+    try:
+        mic_model = keras.models.load_model('models/mic_ecoli_model.keras', compile=False)
+        print("✅ Models loaded: AMP, Toxicity, Stability, Naturalness Discriminator, MIC E.coli")
+    except Exception as e:
+        mic_model = None
+        print(f"⚠️ MIC model not found ({e}). Running without MIC objective.")
 
 
     # Precompute APD kmer sets for novelty-vs-APD objective
@@ -2010,7 +2000,7 @@ def run_simulation():
     # Similarity log path (unique per run)
     os.makedirs('data/similarity_logs', exist_ok=True)
     _agent_label = "AGENT_ON" if USE_AGENT else "AGENT_OFF"
-    RUN_TAG = run_start_time.strftime('%Y%m%d_%H%M') + "_PARETO"
+    RUN_TAG = run_start_time.strftime('%Y%m%d_%H%M') + "_MAPE"
     SIMILARITY_LOG_PATH = f"data/similarity_logs/similarity_log_{RUN_TAG}.csv"
     print(f"🏷️  Run tag: {RUN_TAG}")
 
@@ -2099,8 +2089,8 @@ def run_simulation():
                 processed = processed[:n]
             return processed
 
-        apd_path = 'data/apd_sequences.fasta'
-        apd_available = os.path.exists(apd_path)
+
+        apd_available = os.path.exists('data/apd_sequences.fasta')
 
         print("\n🧬 Population initialization:")
         print("  1. APD-seeded (natural AMP scaffolds)" + (" [available]" if apd_available else " [APD file not found]"))
@@ -2111,8 +2101,9 @@ def run_simulation():
         if choice == "" :
             choice = "1"
 
+
         if choice == "1" and apd_available:
-            apd_seeds = load_apd_seeds(apd_path, peptide_length=peptide_length, n=population_size)
+            apd_seeds = load_apd_seeds('data/apd_sequences.fasta', peptide_length=peptide_length, n=population_size)
             if len(apd_seeds) >= population_size // 2:
                 remainder = population_size - len(apd_seeds)
                 randoms = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(remainder)]
@@ -2123,7 +2114,9 @@ def run_simulation():
                 print(f"⚠️ Not enough APD sequences, falling back to random.")
         elif choice == "3" and apd_available:
             half = population_size // 2
-            apd_seeds = load_apd_seeds(apd_path, peptide_length=peptide_length, n=half)
+            apd_seeds = load_apd_seeds('data/apd_sequences.fasta', peptide_length=peptide_length, n=half)
+
+
             randoms = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size - len(apd_seeds))]
             population = apd_seeds + randoms
             print(f"🌱 Partial seed: {len(apd_seeds)} APD + {len(randoms)} random.")
@@ -2143,10 +2136,12 @@ def run_simulation():
         f.write(f"Population size: {population_size}, Generations: {generations}, Peptide length: {peptide_length}\n")
         f.write("Generation,Mutation Rate\n")
 
+
     stagnant_generations = 0
     best_fitness_so_far = 0
     global_best_score = -np.inf
     global_best_peptide = None
+    map_elites_grid = {}  # (ci, hi) -> (fitness, peptide)
 
     for gen in range(1, generations + 1):
         gen_start = datetime.now()
@@ -2209,10 +2204,13 @@ def run_simulation():
             )
 
 
+
             surprise_amp = 0.0
             surprise_tox = 0.0
+            mic_score = predict_mic_score(pep)
 
             update_salient_motifs(pep, fitness)
+            map_elites_update(map_elites_grid, pep, fitness)
 
             tag = assess_peptide_quality(pep)
 
@@ -2227,7 +2225,10 @@ def run_simulation():
                 surprise_amp,
                 surprise_tox,
                 hydro_moment,
+                mic_score,
             ))
+
+
 
         generation_df = pd.DataFrame(scores, columns=[
             'Peptide',
@@ -2238,7 +2239,8 @@ def run_simulation():
             'Fitness_Score', 'Realism_Score', 'Quality_Tag',
             'PyAMPA_AMP', 'PyAMPA_Toxicity', 'PyAMPA_Hemolysis', 'PyAMPA_CPP',
             'Surprise_AMP', 'Surprise_Toxicity',
-            'Hydrophobic_Moment',  # <-- NEW
+            'Hydrophobic_Moment',
+            'MIC_Score',
         ])
 
 
@@ -2396,6 +2398,8 @@ def run_simulation():
             print(f"🧬 Sequence: {global_best_peptide}")
 
         print(f"🔬 Average similarity in Generation {gen}: {avg_sim:.4f}")
+        me_filled, me_total, me_mean, me_max = map_elites_stats(map_elites_grid)
+        print(f"🗺️  MAP-Elites: {me_filled}/{me_total} cells filled | mean fit: {me_mean:.4f} | best: {me_max:.4f}")
         top5_mean = generation_df.sort_values(by='Fitness_Score', ascending=False) \
                          .head(5)['Fitness_Score'].mean()
 
@@ -2471,25 +2475,26 @@ def run_simulation():
             index=False
         )
 
-        # NSGA-II selection
-        n_select = population_size // 2
-        try:
-            filtered_df = nsga2_select(generation_df, n_select, archive_kmers_ref=list(archive_kmers), apd_kmers_ref=apd_kmers)
-            front0_count = (filtered_df['Pareto_Rank'] == 0).sum()
-            print(f"🧬 NSGA-II: {front0_count} Pareto front-0 survivors selected.")
-        except Exception as e:
-            print(f"⚠️ NSGA-II failed ({e}), falling back to fitness ranking.")
-            filtered_df = generation_df.sort_values(
-                by="Fitness_Score", ascending=False
-            ).head(population_size // 2)
+        # MAP-Elites selection: pull best from each filled cell
+        # plus top sequences from current generation for exploitation
+        grid_seqs = [v[1] for v in map_elites_grid.values()]
 
-        # Safety
-        min_survivors = population_size // 4
-        if len(filtered_df) < min_survivors:
-            print(f"⚠️ Too few survivors ({len(filtered_df)}). Falling back to top-{min_survivors} by fitness.")
+        # Also keep top 25% of current generation for exploitation
+        top_gen = generation_df.sort_values(
+            by="Fitness_Score", ascending=False
+        ).head(population_size // 4)['Peptide'].tolist()
+
+        # Combine grid elites + top generation, deduplicate
+        elite_pool = list(dict.fromkeys(grid_seqs + top_gen))
+
+        # Build filtered_df from elite pool for downstream weight calculation
+        filtered_df = generation_df[generation_df['Peptide'].isin(elite_pool)].copy()
+        if len(filtered_df) < population_size // 4:
             filtered_df = generation_df.sort_values(
                 by="Fitness_Score", ascending=False
-            ).head(min_survivors)
+            ).head(population_size // 4)
+
+        print(f"🗺️  MAP-Elites survivors: {len(filtered_df)} from {me_filled} cells")
 
         # 🧠 Agent adapts motives + meta-cognition (agent only)
         if USE_AGENT and agent is not None:
@@ -2549,11 +2554,24 @@ def run_simulation():
 
         min_realism = 0.08 + 0.14 * min(gen / 2000, 1.0)
 
-        # Safety fallback if not enough survivors
-        if len(filtered_df) >= population_size // 2:
-            survivors = filtered_df.sample(n=population_size // 2, weights='Fitness_Score')['Peptide'].tolist()
-        else:
-            survivors = filtered_df['Peptide'].tolist()
+        # MAP-Elites parent sampling:
+        # 60% from grid (biased toward empty/weak cells for exploration)
+        # 40% from top current generation (exploitation)
+        n_from_grid = int(0.6 * population_size // 2)
+        n_from_top  = population_size // 2 - n_from_grid
+
+        grid_parents = map_elites_sample(map_elites_grid, n_from_grid)
+        top_parents  = generation_df.sort_values(
+            by="Fitness_Score", ascending=False
+        ).head(n_from_top)['Peptide'].tolist()
+
+        survivors = grid_parents + top_parents
+        if not survivors:
+            survivors = generation_df.sort_values(
+                by="Fitness_Score", ascending=False
+            ).head(population_size // 2)['Peptide'].tolist()
+
+
         # ✅ Patch: Inject fallback survivors if empty
         if not survivors:
             print("🚨 No valid survivors found — injecting new random population.")
@@ -2755,6 +2773,14 @@ def run_simulation():
             snap_path = f"data/gen_{gen:04d}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             generation_df.to_csv(snap_path, index=False)
             print(f"💾 Snapshot saved: {snap_path}")
+
+        if gen % 100 == 0:
+            grid_path = f"data/map_elites_grid_gen_{gen:04d}_{RUN_TAG}.csv"
+            grid_rows = [{'charge_bin': CHARGE_BINS[k[0]], 'hydro_bin': HYDRO_BINS[k[1]],
+                          'fitness': v[0], 'peptide': v[1]}
+                         for k, v in map_elites_grid.items()]
+            pd.DataFrame(grid_rows).to_csv(grid_path, index=False)
+            print(f"🗺️  Grid saved: {grid_path}")
 
         # 🌪️ Exploration injection: add 5 wildcards every 250 generations
         if gen % 100 == 0 and avg_realism >= 0.6:
