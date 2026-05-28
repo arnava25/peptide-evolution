@@ -1282,8 +1282,7 @@ def prophet_guided_mutation(parent: str, agent) -> Optional[str]:
         pos_probs, aa_probs = prophet_model.predict(
             X[np.newaxis, ...], verbose=0
         )
-    except Exception as e:
-        print(f"⚠️ Prophet prediction failed: {e}")
+    except Exception:
         return None
 
     pos_probs = pos_probs[0]   # (50,)
@@ -2151,7 +2150,7 @@ def run_simulation():
         print("  2. Random (fully random sequences)")
         if apd_available:
             print("  3. Partial (50% APD + 50% random)")
-        choice = input("Select initialization [1/2/3, default=1]: ").strip()
+        choice = input("Select initialization [1/2/3]: ").strip()
         if choice == "" :
             choice = "1"
 
