@@ -379,8 +379,8 @@ USE_AGENT = True          # True = agent ON (cognitive evolution)
 amino_acids = list('ACDEFGHIKLMNPQRSTVWY')
 population_size = 300
 generations = 2000
-peptide_length = 25
-max_len = 50
+peptide_length = 13
+max_len = 20
 
 STAGNANT_LIMIT = 800      # raised from 600 — prevents accidental early stop on long runs
 
@@ -392,6 +392,14 @@ META_INTROSPECTION_INTERVAL = 50  # e.g. every 25 generations
 EXPLORATION_STAGNANT_TRIGGER = 150   # you can tune this
 MAX_EXPLORATION_BOOST = 1.4         # cap on how hard we shift to curiosity/novelty
 
+
+# ============================================================
+# 🏝️ ISLAND MODEL CONFIGURATION
+# ============================================================
+USE_ISLANDS = True
+N_ISLANDS = 4                    # number of independent subpopulations
+MIGRATION_INTERVAL = 50          # migrate every N generations
+MIGRATION_RATE = 0.05            # fraction of each island that migrates
 
 
 # One-hot encoding function (you might not be using this directly in the scoring)
@@ -666,8 +674,11 @@ def realism_penalty_score(peptide):
     charge = calculate_net_charge(peptide)
     hm = calculate_hydrophobic_moment(peptide)
 
-    # diversity sweet spot
-    div_term = _sigmoid((uniq - 8.5) / 1.5) * _sigmoid((15.5 - uniq) / 2.0)
+
+    if peptide_length <= 15:
+        div_term = _sigmoid((uniq - 5.0) / 1.2) * _sigmoid((13.0 - uniq) / 2.0)
+    else:
+        div_term = _sigmoid((uniq - 8.5) / 1.5) * _sigmoid((15.5 - uniq) / 2.0)
 
     # hydrophobic fraction
     hydro_term = _sigmoid((hydro - 0.22) / 0.06) * _sigmoid((0.66 - hydro) / 0.06)
@@ -676,16 +687,24 @@ def realism_penalty_score(peptide):
     polar_term = _sigmoid((polar - 0.08) / 0.06) * _sigmoid((0.70 - polar) / 0.08)
 
     # charge window
-    charge_term = _sigmoid((charge - 1.0) / 1.2) * _sigmoid((10.5 - charge) / 1.5)
+    charge_upper = 8.0 if peptide_length <= 15 else 10.5
+    charge_term = _sigmoid((charge - 1.0) / 1.2) * _sigmoid((charge_upper - charge) / 1.5)
+
 
     # cysteine / proline softness
-    c_term = _sigmoid((3.2 - peptide.count("C")) / 0.7)
-    p_term = _sigmoid((4.8 - peptide.count("P")) / 0.9)
+
+    c_max = 2.0 if peptide_length <= 15 else 3.2
+    p_max = 3.0 if peptide_length <= 15 else 4.8
+    c_term = _sigmoid((c_max - peptide.count("C")) / 0.7)
+    p_term = _sigmoid((p_max - peptide.count("P")) / 0.9)
 
     # hydrophobic run penalty
     hydrophobic_set = set("AILMVFWY")
     max_hydro_run = _max_run_len(peptide, hydrophobic_set)
-    run_term = _sigmoid((4.2 - max_hydro_run) / 0.9)
+
+    run_cutoff = 3.0 if peptide_length <= 15 else 4.2
+    run_term = _sigmoid((run_cutoff - max_hydro_run) / 0.9)
+
 
     if "PPPP" in peptide or "CCCC" in peptide:
         run_term *= 0.6
@@ -735,7 +754,9 @@ def compute_quality_score(peptide):
     unique_aas = len(set(peptide))
 
     # Charge range bonus zone
-    if 2 <= net_charge <= 8:
+
+    charge_max = 6 if peptide_length <= 15 else 8
+    if 2 <= net_charge <= charge_max:
         score *= 1.05
     else:
         score *= 0.95
@@ -1921,6 +1942,30 @@ def map_elites_stats(grid: dict) -> tuple:
     return filled, total, float(np.mean(fits)), float(np.max(fits))
 
 
+def migrate_islands(islands: list[list[str]], migration_rate: float) -> list[list[str]]:
+    """
+    Ring migration: each island sends its top migrants to the next island.
+    Replaces the weakest sequences in the receiving island.
+    """
+    n_islands = len(islands)
+    n_migrants = max(1, int(len(islands[0]) * migration_rate))
+    
+    # collect migrants from each island (top by fitness proxy = just take first n,
+    # since islands are already sorted by the end of each generation)
+    migrants = []
+    for island in islands:
+        migrants.append(island[:n_migrants])  # top n from each island
+    
+    # ring: island 0 -> island 1 -> ... -> island N-1 -> island 0
+    new_islands = []
+    for i, island in enumerate(islands):
+        donor = migrants[(i - 1) % n_islands]  # receive from previous island
+        # replace worst sequences with migrants
+        new_island = island[:-n_migrants] + donor
+        random.shuffle(new_island)
+        new_islands.append(new_island)
+    
+    return new_islands
 
 
 def run_simulation():
@@ -2000,7 +2045,7 @@ def run_simulation():
     # Similarity log path (unique per run)
     os.makedirs('data/similarity_logs', exist_ok=True)
     _agent_label = "AGENT_ON" if USE_AGENT else "AGENT_OFF"
-    RUN_TAG = run_start_time.strftime('%Y%m%d_%H%M') + "_MAPE"
+    RUN_TAG = run_start_time.strftime('%Y%m%d_%H%M') + f"_MAPE_{peptide_length}mer"
     SIMILARITY_LOG_PATH = f"data/similarity_logs/similarity_log_{RUN_TAG}.csv"
     print(f"🏷️  Run tag: {RUN_TAG}")
 
@@ -2054,13 +2099,22 @@ def run_simulation():
 
 
 
+    # Initialize islands
+    saved_pop = load_population()
+    
+    if USE_ISLANDS and not saved_pop:
+        islands = None  # will be initialized after population choice
+    elif saved_pop:
+        # Resume: split saved population across islands
+        chunk = len(saved_pop) // N_ISLANDS
+        islands = [saved_pop[i*chunk:(i+1)*chunk] for i in range(N_ISLANDS)]
+        # flatten for compatibility with existing init check
+        population = saved_pop
+    else:
+        islands = None
+        population = None
 
-
-
-
-    # Initialize population
-    population = load_population()
-    if not population:
+    if not saved_pop:
         def load_apd_seeds(fasta_path, peptide_length=25, n=None):
             seeds = []
             with open(fasta_path) as f:
@@ -2127,7 +2181,13 @@ def run_simulation():
 
 
 
-
+    # Split population into islands if using island model
+    if USE_ISLANDS:
+        chunk = len(population) // N_ISLANDS
+        islands = [population[i*chunk:(i+1)*chunk] for i in range(N_ISLANDS)]
+        print(f"🏝️  Island model: {N_ISLANDS} islands x {chunk} sequences each")
+    else:
+        islands = [population]
 
 
     # Mark a new run in mutation history
@@ -2175,6 +2235,9 @@ def run_simulation():
                 explore_parent_prob = 0.10
                 tournament_k = 3
                 agent.r = max(3.6, agent.r - 0.03)
+
+        # Flatten islands into single population for scoring/logging
+        population = [pep for island in islands for pep in island]
 
 
         encoded_population = np.array([encode_int(p) for p in population])
@@ -2829,8 +2892,29 @@ def run_simulation():
                 stat_file.write("Generation,AvgFitness,MaxFitness,StdFitness\n")
             stat_file.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f}\n")
 
-        population = new_population
+
+        if not USE_ISLANDS:
+            population = new_population
         save_population(population)
+
+
+        # 🏝️ Island migration
+        if USE_ISLANDS and gen % MIGRATION_INTERVAL == 0:
+            # Re-sort each island by fitness before migration
+            island_size = population_size // N_ISLANDS
+            for i in range(N_ISLANDS):
+                isle_peps = new_population[i*island_size:(i+1)*island_size]
+                if len(isle_peps) > 0:
+                    islands[i] = isle_peps
+            islands = migrate_islands(islands, MIGRATION_RATE)
+            print(f"🏝️  Migration at gen {gen}: {N_ISLANDS} islands exchanged migrants")
+        elif USE_ISLANDS:
+            # Redistribute new_population back into islands
+            island_size = len(new_population) // N_ISLANDS
+            islands = [new_population[i*island_size:(i+1)*island_size] for i in range(N_ISLANDS)]
+        else:
+            population = new_population
+
 
         # 🛑 Check for early stop request
         if check_early_stop():
