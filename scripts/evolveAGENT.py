@@ -377,7 +377,7 @@ USE_AGENT = True          # True = agent ON (cognitive evolution)
 
 # Settings
 amino_acids = list('ACDEFGHIKLMNPQRSTVWY')
-population_size = 300
+population_size = 400
 generations = 2000
 peptide_length = 13
 max_len = 20
