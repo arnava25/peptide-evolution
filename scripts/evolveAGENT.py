@@ -598,10 +598,10 @@ def score_peptide(
     # --- Softplus compression (preserves resolution at the top unlike logistic) ---
     # softplus(x) = log(1 + exp(x)), scaled to [0,1]
     # This keeps meaningful fitness differences between 0.85 and 0.95 sequences 
-    scale = 6.0   # steeper curve
-    shifted = gated - 0.55  # shift midpoint higher so top scores don't saturate
+    scale = 6.0
+    shifted = gated - 0.70  # pushed higher to account for nov_bonus and crowd_pen multipliers
     sp = math.log(1.0 + math.exp(_clamp(scale * shifted, -60.0, 60.0)))
-    sp_max = math.log(1.0 + math.exp(scale * 0.45))  # normalizer
+    sp_max = math.log(1.0 + math.exp(scale * 0.30))  # normalizer
     fitness = float(_clamp(sp / sp_max, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
