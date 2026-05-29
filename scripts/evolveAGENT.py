@@ -533,7 +533,13 @@ def score_peptide(
 
     disagreement_penalty = 0.0
 
-
+    # --- Stability heuristic (replaces stability CNN) ---
+    # Combines aggregation safety, hydrophobic balance, and realism
+    # Range roughly 0.3-0.9 for realistic sequences
+    agg_safe = 1.0 - aggregation_risk                          # 0-1, high = stable
+    hydro_ok = 1.0 - abs(hydrophobicity - 0.40) / 0.40        # peaks at hydro=0.40
+    hydro_ok = float(_clamp(hydro_ok, 0.0, 1.0))
+    stab_score = float(_clamp(0.4 * agg_safe + 0.3 * hydro_ok + 0.3 * realism, 0.0, 1.0))
 
 
     # --- Novelty term ---
@@ -565,6 +571,7 @@ def score_peptide(
     w_amp, w_safety, w_stab, w_quality, w_novel, w_real, w_mic = weights
 
     # --- Core Value ---
+
     value = (
         w_amp     * amp_score +
         w_safety  * (1.0 - tox_score) +
@@ -595,9 +602,6 @@ def score_peptide(
 
     gated = max(0.0, gated - disagreement_penalty)
     gated = float(_clamp(gated, 0.0, 1.0))  # hard clamp before compression
-    # Quality gate: penalize if core objectives aren't jointly satisfied
-    if amp_score < 0.5 or (1.0 - tox_score) < 0.4 or stab_score < 0.4:
-        gated *= 0.4  # heavy penalty for sequences weak on any core objective
 
     # --- Softplus compression ---
     scale = 6.0
@@ -1801,7 +1805,7 @@ def _estimate_deltas_batch(
 
     amp = amp_model.predict(X, verbose=0).reshape(-1)
     tox = tox_model.predict(X, verbose=0).reshape(-1)
-    stab = stab_model.predict(X, verbose=0).reshape(-1)
+    stab = np.zeros(len(candidates), dtype=float)  # placeholder — stability is heuristic now
 
     realism = np.array([realism_penalty_score(c) for c in candidates], dtype=float)
 
@@ -2118,11 +2122,10 @@ def run_simulation():
     global world_model, naturalness_model, prophet_model
     global global_best_peptide, global_best_score
 
-
     amp_model = keras.models.load_model('models/amp_model.keras', compile=False)
     toxicity_model = keras.models.load_model('models/toxicity_cnn_model.keras', compile=False)
-    stability_model = keras.models.load_model('models/stability_cnn_model.keras', compile=False)
-
+    stability_model = None  # replaced by heuristic in score_peptide
+    print("ℹ️  Stability CNN disabled — using biophysical heuristic instead")
 
     naturalness_model = keras.models.load_model('models/naturalness_discriminator.keras')
     global mic_model
@@ -2389,7 +2392,7 @@ def run_simulation():
             encoded = np.array([encode_int(p, max_len=max_len) for p in island])
             amp_sc  = amp_model.predict(encoded, verbose=0).flatten()
             tox_sc  = toxicity_model.predict(encoded, verbose=0).flatten()
-            stab_sc = stability_model.predict(encoded, verbose=0).flatten()
+            stab_sc = np.zeros(len(island), dtype=float)  # placeholder — heuristic used inside score_peptide
 
             scores = []
             for idx, pep in enumerate(island):
@@ -2674,7 +2677,7 @@ def run_simulation():
                     enc   = np.array([encode_int(child, max_len=max_len)])
                     amp_c = float(amp_model.predict(enc, verbose=0)[0][0])
                     tox_c = float(toxicity_model.predict(enc, verbose=0)[0][0])
-                    stab_c = float(stability_model.predict(enc, verbose=0)[0][0])
+                    stab_c = 0.0  # placeholder — heuristic used inside score_peptide
                     cf    = score_peptide(child, amp_c, tox_c, stab_c,
                                           agent=isl_agent if USE_AGENT else None)[3]
 
