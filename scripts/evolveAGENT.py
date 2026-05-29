@@ -65,8 +65,9 @@ niche_penalty_active = 0  # countdown timer
 # Persistent cell crowding — tracks how many high-fitness sequences
 # have been found per MAP-Elites cell. Never resets.
 _cell_visit_counts: dict = {}   # (ci, hi) -> int
-_CROWDING_PENALTY_START = 5     # visits before penalty kicks in
-_CROWDING_PENALTY_MAX   = 0.80  # floor multiplier for very crowded cells
+
+_CROWDING_PENALTY_START = 50
+_CROWDING_PENALTY_MAX   = 0.92
 
 world_model = None
 naturalness_model = None 
@@ -1020,9 +1021,9 @@ def archive_novelty_bonus(peptide: str, archive_kmers, k: int = ARCHIVE_K) -> fl
         return 1.0  # early in run, no penalty
     nov = novelty_vs_archive(peptide, archive_kmers, k=k, sample_n=200)
     # linear mapping: nov 0→0.75, nov 0.5→1.0, nov 1.0→1.25
-    bonus = 0.85 + 0.20 * nov
-    return float(_clamp(bonus, 0.85, 1.05))
 
+    bonus = 0.90 + 0.10 * nov
+    return float(_clamp(bonus, 0.90, 1.00))
 
 def similarity_penalty(pop, k: int = 3):
     if len(pop) < 2:
