@@ -36,11 +36,12 @@ def find_latest_run_tag():
 
             # Strip optional _AGENT_ON / _AGENT_OFF to parse the timestamp
             timestamp_part = full_tag
-            for label in ("_AGENT_ON", "_AGENT_OFF"):
+
+
+            for label in ("_AGENT_ON", "_AGENT_OFF", "_MAPE_13mer", "_MAPE_8mer", "_MAPE", "_PARETO"):
                 if timestamp_part.endswith(label):
                     timestamp_part = timestamp_part[: -len(label)]
                     break
-
             try:
                 dt = datetime.strptime(timestamp_part, "%Y%m%d_%H%M")
             except ValueError:
