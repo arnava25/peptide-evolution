@@ -62,6 +62,12 @@ niche_archive = []   # list of (kmer_set, fitness) for cleared niches
 NICHE_PENALTY_GENS = 150  # how long to penalize similarity to cleared niches
 niche_penalty_active = 0  # countdown timer
 
+# Persistent cell crowding — tracks how many high-fitness sequences
+# have been found per MAP-Elites cell. Never resets.
+_cell_visit_counts: dict = {}   # (ci, hi) -> int
+_CROWDING_PENALTY_START = 5     # visits before penalty kicks in
+_CROWDING_PENALTY_MAX   = 0.80  # floor multiplier for very crowded cells
+
 world_model = None
 naturalness_model = None 
 prophet_model = None
@@ -583,13 +589,15 @@ def score_peptide(
         avg_rarity = float(np.mean(rarity_scores)) if rarity_scores else 0.0
         entropy_bonus = 1.0 + _ENTROPY_BONUS_WEIGHT * avg_rarity
 
-    gated = value * structure_bonus * turing_bonus * niche_penalty_score(peptide) * entropy_bonus
+    nov_bonus  = archive_novelty_bonus(peptide, archive_kmers)
+    crowd_pen  = crowding_penalty(peptide)
+    gated = value * structure_bonus * turing_bonus * niche_penalty_score(peptide) * entropy_bonus * nov_bonus * crowd_pen
 
     gated = max(0.0, gated - disagreement_penalty)
 
     # --- Softplus compression (preserves resolution at the top unlike logistic) ---
     # softplus(x) = log(1 + exp(x)), scaled to [0,1]
-    # This keeps meaningful fitness differences between 0.85 and 0.95 sequences
+    # This keeps meaningful fitness differences between 0.85 and 0.95 sequences 
     scale = 6.0   # steeper curve
     shifted = gated - 0.55  # shift midpoint higher so top scores don't saturate
     sp = math.log(1.0 + math.exp(_clamp(scale * shifted, -60.0, 60.0)))
@@ -1003,6 +1011,22 @@ def niche_penalty_score(peptide: str) -> float:
         if sim > 0.6:
             return 0.7  # penalize strongly
     return 1.0
+
+def archive_novelty_bonus(peptide: str, archive_kmers, k: int = ARCHIVE_K) -> float:
+    """
+    Returns a multiplier > 1.0 for novel sequences, < 1.0 for redundant ones.
+    Based on sequence-space distance to the archive.
+    - novelty = 1.0 (completely novel) → bonus = 1.25
+    - novelty = 0.5 (moderately similar) → bonus = 1.0  
+    - novelty = 0.0 (identical to archive) → bonus = 0.75
+    This creates persistent pressure to find new regions regardless of fitness.
+    """
+    if not archive_kmers or len(archive_kmers) < 50:
+        return 1.0  # early in run, no penalty
+    nov = novelty_vs_archive(peptide, archive_kmers, k=k, sample_n=200)
+    # linear mapping: nov 0→0.75, nov 0.5→1.0, nov 1.0→1.25
+    bonus = 0.75 + 0.50 * nov
+    return float(_clamp(bonus, 0.75, 1.25))
 
 
 def similarity_penalty(pop, k: int = 3):
@@ -1460,11 +1484,11 @@ class AgentController:
 
         # === baseline personality (soft exploitation)
         baseline = np.array([
-            0.22,  # amp
-            0.17,  # safety
-            0.18,  # stability  ← nudged up from 0.15 (stability is the persistent weak point)
+            0.24,  # amp          ← slight bump since novelty now handled structurally
+            0.18,  # safety
+            0.19,  # stability
             0.09,  # realism
-            0.11,  # novelty
+            0.07,  # novelty      ← reduced: archive bonus handles this now
             0.08,  # parsimony
             0.15,  # curiosity
         ])
@@ -2030,6 +2054,30 @@ def map_elites_stats(grid: dict) -> tuple:
     fits = [v[0] for v in grid.values()]
     return filled, total, float(np.mean(fits)), float(np.max(fits))
 
+def crowding_penalty(peptide: str) -> float:
+    """
+    Returns a penalty multiplier based on how many times this MAP-Elites
+    cell has already produced high-fitness sequences.
+    1.0 = unexplored cell, down to _CROWDING_PENALTY_MAX for saturated cells.
+    """
+    ci, hi = get_cell(peptide)
+    visits = _cell_visit_counts.get((ci, hi), 0)
+    if visits < _CROWDING_PENALTY_START:
+        return 1.0
+    # log decay: lots of visits → strong penalty, but never zero
+    penalty = 1.0 - 0.04 * math.log(1 + visits - _CROWDING_PENALTY_START)
+    return float(_clamp(penalty, _CROWDING_PENALTY_MAX, 1.0))
+
+
+def crowding_update(peptide: str, fitness: float, threshold: float = 0.70):
+    """
+    Record a visit to this cell if the sequence is high-fitness.
+    Only counts sequences above threshold to avoid polluting with junk.
+    """
+    if fitness >= threshold:
+        ci, hi = get_cell(peptide)
+        key = (ci, hi)
+        _cell_visit_counts[key] = _cell_visit_counts.get(key, 0) + 1
 
 def migrate_islands(islands: list[list[str]], migration_rate: float) -> list[list[str]]:
     """
@@ -2356,6 +2404,7 @@ def run_simulation():
                 mic_score = predict_mic_score(pep)
                 update_salient_motifs(pep, fitness)
                 map_elites_update(map_elites_grids[isl_idx], pep, fitness)
+                crowding_update(pep, fitness)
                 tag = assess_peptide_quality(pep)
                 scores.append((
                     pep, amp_v, tox_v, stab_v, sol, agg, pI, boman,
@@ -2444,14 +2493,18 @@ def run_simulation():
         # Niche clearing: if population has converged hard, archive the dominant cluster
         # and activate penalty to discourage re-convergence to the same scaffold
         global niche_archive, niche_penalty_active
-        if avg_sim > 0.55 and niche_penalty_active == 0:
+        # Trigger on convergence OR prolonged stagnation
+        stagnation_trigger = stagnant_generations > 200 and niche_penalty_active == 0
+        similarity_trigger = avg_sim > 0.55 and niche_penalty_active == 0
+        if similarity_trigger or stagnation_trigger:
             top_seqs = generation_df.sort_values('Fitness_Score', ascending=False).head(20)['Peptide'].tolist()
             dominant_kmers = set()
             for s in top_seqs:
                 dominant_kmers.update(kmer_set(s, ARCHIVE_K))
             niche_archive.append((dominant_kmers, float(generation_df['Fitness_Score'].max())))
             niche_penalty_active = NICHE_PENALTY_GENS
-            print(f"🔴 Niche cleared at gen {gen} (avg_sim={avg_sim:.3f}). Penalty active for {NICHE_PENALTY_GENS} gens.")
+            trigger_reason = "similarity" if similarity_trigger else "stagnation"
+            print(f"🔴 Niche cleared at gen {gen} ({trigger_reason}, avg_sim={avg_sim:.3f}, stagnant={stagnant_generations}). Penalty active for {NICHE_PENALTY_GENS} gens.")
 
         mean_H, max_H = compute_population_entropy(population)
 
