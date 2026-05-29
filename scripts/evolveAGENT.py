@@ -599,9 +599,9 @@ def score_peptide(
     # softplus(x) = log(1 + exp(x)), scaled to [0,1]
     # This keeps meaningful fitness differences between 0.85 and 0.95 sequences 
     scale = 6.0
-    shifted = gated - 0.70  # pushed higher to account for nov_bonus and crowd_pen multipliers
+    shifted = gated - 0.85
     sp = math.log(1.0 + math.exp(_clamp(scale * shifted, -60.0, 60.0)))
-    sp_max = math.log(1.0 + math.exp(scale * 0.30))  # normalizer
+    sp_max = math.log(1.0 + math.exp(scale * 0.15))
     fitness = float(_clamp(sp / sp_max, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
