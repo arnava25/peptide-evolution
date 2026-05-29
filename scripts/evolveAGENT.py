@@ -60,6 +60,10 @@ archive_seen  = set()                       # exact dedupe
 archive_queue = deque(maxlen=ARCHIVE_MAX)   # deque[str]
 
 
+niche_archive = []   # list of (kmer_set, fitness) for cleared niches
+NICHE_PENALTY_GENS = 150  # how long to penalize similarity to cleared niches
+niche_penalty_active = 0  # countdown timer
+
 world_model = None
 naturalness_model = None 
 prophet_model = None
@@ -79,9 +83,10 @@ CURRENT_POP_FILE = 'data/current_population.txt'
 MUTATION_HISTORY_FILE = 'data/mutation_rate_history.txt'
 
 
-WORLD_MODEL_ERROR_FILE = 'data/world_model_error.csv'
-NOVELTY_STATS_FILE = 'data/novelty_stats.csv'
-ENTROPY_STATS_FILE = 'data/entropy_stats.csv'
+# These are set per-run inside run_simulation() with RUN_TAG suffix
+WORLD_MODEL_ERROR_FILE = None
+NOVELTY_STATS_FILE = None
+ENTROPY_STATS_FILE = None
 
 
 os.makedirs('data', exist_ok=True)
@@ -174,7 +179,6 @@ def pwm_train_one_epoch():
         epochs=1,
         verbose=0
     )
-
 
 
 
@@ -405,7 +409,9 @@ MIGRATION_RATE = 0.05            # fraction of each island that migrates
 # One-hot encoding function (you might not be using this directly in the scoring)
 aa_to_idx = {aa: idx for idx, aa in enumerate(amino_acids)}
 # Scoring function
-def encode_int(seq, max_len=50):
+
+def encode_int(seq: str, max_len: int) -> np.ndarray:
+    """Encode peptide sequence to integer array. max_len must always be passed explicitly."""
     int_seq = np.zeros(max_len, dtype=np.int32)
     for i, aa in enumerate(seq[:max_len]):
         idx = aa_to_idx.get(aa)
@@ -413,12 +419,13 @@ def encode_int(seq, max_len=50):
             int_seq[i] = idx + 1  # 1-indexed
     return int_seq
 
+    
 def predict_single_value(model, int_encoded):
     """Helper to predict a single float output cleanly."""
     return float(model.predict(int_encoded, verbose=0)[0][0])
 
 
-def encode_seq_for_prophet(seq: str, max_len: int = 50) -> np.ndarray:
+def encode_seq_for_prophet(seq: str, max_len: int) -> np.ndarray:
     """
     One-hot encode a peptide sequence into shape (max_len, 20),
     padded with zeros. Uses the same amino_acids order as training.
@@ -509,8 +516,7 @@ def score_peptide(
     if naturalness_model is not None:
         try:
             # Predict takes shape (1, 50)
-            nat_pred = float(naturalness_model.predict(encode_int(peptide).reshape(1, -1), verbose=0)[0][0])
-            
+            nat_pred = float(naturalness_model.predict(encode_int(peptide, max_len=max_len).reshape(1, -1), verbose=0)[0][0])            
             if nat_pred < 0.3:
                 turing_bonus = 0.5  # Heavy penalty for "Alien" looking junk
             elif nat_pred > 0.8:
@@ -559,14 +565,15 @@ def score_peptide(
         w_real    * realism
     )
 
-    gated = value * structure_bonus * turing_bonus
+    gated = value * structure_bonus * turing_bonus * niche_penalty_score(peptide)
 
 
     gated = max(0.0, gated - disagreement_penalty)
 
     # --- Logistic compression ---
-    beta = 2.5
-    bias = 0.4
+    beta = 1.5
+    bias = 0.35
+
     x = beta * (gated - bias)
     x = _clamp(x, -60.0, 60.0)
     fitness = 1.0 / (1.0 + math.exp(-x))
@@ -937,6 +944,25 @@ def average_similarity(population, k: int = 3):
     return float(np.mean(sims)) if sims else 0.0
 
 
+def niche_penalty_score(peptide: str) -> float:
+    """
+    Returns a penalty multiplier (0.7-1.0) if peptide is similar to a cleared niche.
+    1.0 = no penalty, 0.7 = heavy penalty.
+    """
+    global niche_archive, niche_penalty_active
+    if not niche_archive or niche_penalty_active <= 0:
+        return 1.0
+    S = kmer_set(peptide, ARCHIVE_K)
+    for archived_kmers, _ in niche_archive:
+        if not archived_kmers or not S:
+            continue
+        inter = len(S & archived_kmers)
+        union = len(S | archived_kmers)
+        sim = inter / union if union else 0.0
+        if sim > 0.6:
+            return 0.7  # penalize strongly
+    return 1.0
+
 
 def similarity_penalty(pop, k: int = 3):
     if len(pop) < 2:
@@ -1171,14 +1197,7 @@ def log_entropy_stats(population, gen):
         f.write(f"{gen},{mean_H:.4f},{max_H:.4f}\n")
 
 
-
-
-# Evolution loop
-stagnant_generations = 0
-best_fitness_so_far = 0
-
-global_best_peptide = None
-global_best_score = -np.inf
+# global_best_peptide and global_best_score are initialized inside run_simulation()
 
 def crossover(parent1, parent2):
     """Two-point crossover (swap a segment between parents)."""
@@ -1593,6 +1612,25 @@ class AgentController:
 
         return self.goal_mode
 
+def get_island_agent(island_idx: int) -> AgentController:
+    """
+    Each island gets a slightly different personality.
+    """
+    agent = AgentController()
+    if island_idx == 0:
+        # Island 0: AMP-focused
+        agent.w = np.array([0.35, 0.20, 0.15, 0.08, 0.10, 0.05, 0.07])
+    elif island_idx == 1:
+        # Island 1: Safety/stability focused
+        agent.w = np.array([0.20, 0.30, 0.25, 0.08, 0.08, 0.05, 0.04])
+    elif island_idx == 2:
+        # Island 2: Novelty focused
+        agent.w = np.array([0.18, 0.15, 0.12, 0.07, 0.28, 0.05, 0.15])
+    elif island_idx == 3:
+        # Island 3: MIC/realism focused
+        agent.w = np.array([0.25, 0.20, 0.18, 0.15, 0.10, 0.07, 0.05])
+    agent.w = agent.w / agent.w.sum()
+    return agent
 
 
 def kmer_set(seq: str, k: int = 3) -> set:
@@ -1610,6 +1648,16 @@ def jaccard_kmer_similarity(a: str, b: str, k: int = 3) -> float:
     inter = len(A & B)
     union = len(A | B)
     return inter / union if union else 0.0
+
+def novelty_floor_check(peptide: str, archive_kmers, threshold: float = 0.15) -> bool:
+    """
+    Returns True if peptide is novel enough to be considered.
+    Rejects sequences too similar to anything in the archive.
+    """
+    if not archive_kmers or len(archive_kmers) < 100:
+        return True  # early in run, don't filter
+    nov = novelty_vs_archive(peptide, archive_kmers, k=ARCHIVE_K, sample_n=200)
+    return nov >= threshold
 
 def novelty_vs_archive(seq: str, archive_kmers: list[set], k: int = 3, sample_n: int = 400) -> float:
     """
@@ -1728,7 +1776,8 @@ def _estimate_deltas(candidate: str,
     Deterministic 'reasons' for/against a candidate mutation.
     All terms are quick-to-compute proxies you already use elsewhere.
     """
-    int_enc = np.array([encode_int(candidate)])
+
+    int_enc = np.array([encode_int(candidate, max_len=max_len)])
     amp = float(amp_model.predict(int_enc, verbose=0)[0][0])
     tox = float(tox_model.predict(int_enc, verbose=0)[0][0])
     stab = float(stab_model.predict(int_enc, verbose=0)[0][0])
@@ -1947,20 +1996,23 @@ def migrate_islands(islands: list[list[str]], migration_rate: float) -> list[lis
     Replaces the weakest sequences in the receiving island.
     """
     n_islands = len(islands)
-    n_migrants = max(1, int(len(islands[0]) * migration_rate))
+    # compute per island so size drift doesn't corrupt smaller islands
+    island_sizes = [len(isl) for isl in islands]
     
     # collect migrants from each island (top by fitness proxy = just take first n,
     # since islands are already sorted by the end of each generation)
-    migrants = []
-    for island in islands:
-        migrants.append(island[:n_migrants])  # top n from each island
     
+    migrants = []
+    for isl, size in zip(islands, island_sizes):
+        n = max(1, int(size * migration_rate))
+        migrants.append(isl[:n])
+        
     # ring: island 0 -> island 1 -> ... -> island N-1 -> island 0
     new_islands = []
     for i, island in enumerate(islands):
-        donor = migrants[(i - 1) % n_islands]  # receive from previous island
-        # replace worst sequences with migrants
-        new_island = island[:-n_migrants] + donor
+        donor = migrants[(i - 1) % n_islands]
+        n = len(donor)
+        new_island = island[:-n] + donor
         random.shuffle(new_island)
         new_islands.append(new_island)
     
@@ -2033,10 +2085,18 @@ def run_simulation():
 
     # 🧠 Initialize cognitive controller
     if USE_AGENT:
-        agent = AgentController()
-        print("🧠 Cognitive agent initialized (USE_AGENT=True)")
+        if USE_ISLANDS:
+            agents = [get_island_agent(i) for i in range(N_ISLANDS)]
+            agent = agents[0]  # default for non-island code paths
+            print(f"🧠 {N_ISLANDS} island agents initialized with distinct personalities")
+        else:
+            agents = None
+            agent = AgentController()
+            print("🧠 Cognitive agent initialized (USE_AGENT=True)")
     else:
+        agents = None
         agent = None
+
         print("⚙️  Running as standard GA baseline (USE_AGENT=False)")
 
     run_start_time = datetime.now()
@@ -2089,31 +2149,20 @@ def run_simulation():
 
     # Create trait stats output folder if needed
     os.makedirs('data/trait_stats', exist_ok=True)
-
-    # Create trait stats output folder if needed
-    os.makedirs('data/trait_stats', exist_ok=True)
     os.makedirs('data/evolution_histories', exist_ok=True)
+
     trait_log_path = f"data/trait_stats/trait_stats_{RUN_TAG}.csv"
     THIS_RUN_FILE = f"data/evolution_histories/evolution_run_{RUN_TAG}.csv"
 
 
-
     # Initialize islands
-    saved_pop = load_population()
-    
-    if USE_ISLANDS and not saved_pop:
-        islands = None  # will be initialized after population choice
-    elif saved_pop:
-        # Resume: split saved population across islands
-        chunk = len(saved_pop) // N_ISLANDS
-        islands = [saved_pop[i*chunk:(i+1)*chunk] for i in range(N_ISLANDS)]
-        # flatten for compatibility with existing init check
-        population = saved_pop
-    else:
-        islands = None
-        population = None
 
-    if not saved_pop:
+    saved_pop = load_population()
+
+    if saved_pop:
+        population = saved_pop
+        print(f"🔄 Resuming from saved population: {len(population)} sequences.")
+    else:
         def load_apd_seeds(fasta_path, peptide_length=25, n=None):
             seeds = []
             with open(fasta_path) as f:
@@ -2142,7 +2191,6 @@ def run_simulation():
                 processed = processed[:n]
             return processed
 
-
         apd_available = os.path.exists('data/apd_sequences.fasta')
 
         print("\n🧬 Population initialization:")
@@ -2151,9 +2199,8 @@ def run_simulation():
         if apd_available:
             print("  3. Partial (50% APD + 50% random)")
         choice = input("Select initialization [1/2/3]: ").strip()
-        if choice == "" :
+        if choice == "":
             choice = "1"
-
 
         if choice == "1" and apd_available:
             apd_seeds = load_apd_seeds('data/apd_sequences.fasta', peptide_length=peptide_length, n=population_size)
@@ -2168,15 +2215,12 @@ def run_simulation():
         elif choice == "3" and apd_available:
             half = population_size // 2
             apd_seeds = load_apd_seeds('data/apd_sequences.fasta', peptide_length=peptide_length, n=half)
-
-
             randoms = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size - len(apd_seeds))]
             population = apd_seeds + randoms
             print(f"🌱 Partial seed: {len(apd_seeds)} APD + {len(randoms)} random.")
         else:
             population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
             print(f"🌱 Random population: {population_size} sequences.")
-
 
 
 
@@ -2200,724 +2244,468 @@ def run_simulation():
     best_fitness_so_far = 0
     global_best_score = -np.inf
     global_best_peptide = None
-    map_elites_grid = {}  # (ci, hi) -> (fitness, peptide)
+
+    # One MAP-Elites grid per island to preserve island diversity
+    map_elites_grids = [{} for _ in range(N_ISLANDS if USE_ISLANDS else 1)]
+
+
+
+
+
+
+
 
     for gen in range(1, generations + 1):
         gen_start = datetime.now()
-        print(f"🌱 Generation {gen}...")
-        
-        # (Optional) Log r to see the "heartbeat" of the agent
-        # You can add 'r' to your AGENT_LOG columns if you want
+        print(f"\\n🌱 Generation {gen}...")
 
+        # ── Per-gen agent rotation ──────────────────────────────────────
+        if USE_ISLANDS and agents is not None:
+            # Each gen, the "primary" agent rotates so logs reflect diversity
+            agent = agents[gen % N_ISLANDS]
 
-        # 🎯 Parent selection schedule: softer early, sharper later
+        # ── Goal mode overrides ─────────────────────────────────────────
         if gen < 200:
-            tournament_k = 2
-            explore_parent_prob = 0.30   # 30% of the time: purely random parents
+            tournament_k       = 2
+            explore_parent_prob = 0.30
         else:
-            tournament_k = 3
-            explore_parent_prob = 0.15   # still some randomness, but less
+            tournament_k       = 3
+            explore_parent_prob = 0.15
 
-        # Goal mode overrides (anti-plateau) — agent only
-        if USE_AGENT and agent is not None:
+
+        for isl_idx, isl_agent in enumerate(agents if (USE_ISLANDS and agents) else ([agent] if agent is not None else [])):
+            if USE_ISLANDS and agents:
+                mode = isl_agent.goal_mode
             if mode == "explore":
-                explore_parent_prob = 0.40
-                tournament_k = 2
-                agent.delta_tie = 0.06
-                agent.r = min(4.0, agent.r + 0.02)
+                explore_parent_prob = 0.40; tournament_k = 2
+                isl_agent.delta_tie = 0.06
+                isl_agent.r = min(4.0, isl_agent.r + 0.02)
             elif mode == "exploit":
-                explore_parent_prob = 0.05
-                tournament_k = 4
-                agent.delta_tie = 0.01
-                agent.r = max(3.6, agent.r - 0.02)
+                explore_parent_prob = 0.05; tournament_k = 4
+                isl_agent.delta_tie = 0.01
+                isl_agent.r = max(3.6, isl_agent.r - 0.02)
             elif mode == "stabilize":
-                explore_parent_prob = 0.10
-                tournament_k = 3
-                agent.r = max(3.6, agent.r - 0.03)
+                explore_parent_prob = 0.10; tournament_k = 3
+                isl_agent.r = max(3.6, isl_agent.r - 0.03)
 
-        # Flatten islands into single population for scoring/logging
-        population = [pep for island in islands for pep in island]
+        # ── Score each island independently ────────────────────────────
+        island_dfs   = []   # per-island DataFrames
+        island_new   = []   # per-island new populations
 
+        for isl_idx, island in enumerate(islands):
+            isl_agent = agents[isl_idx] if (USE_ISLANDS and agents) else agent
 
-        encoded_population = np.array([encode_int(p) for p in population])
-        amp_scores = amp_model.predict(encoded_population, verbose=0).flatten()
-        tox_scores = toxicity_model.predict(encoded_population, verbose=0).flatten()
-        stab_scores = stability_model.predict(encoded_population, verbose=0).flatten()
+            encoded = np.array([encode_int(p, max_len=max_len) for p in island])
+            amp_sc  = amp_model.predict(encoded, verbose=0).flatten()
+            tox_sc  = toxicity_model.predict(encoded, verbose=0).flatten()
+            stab_sc = stability_model.predict(encoded, verbose=0).flatten()
 
+            scores = []
+            for idx, pep in enumerate(island):
+                amp_i, tox_i, stab_i = float(amp_sc[idx]), float(tox_sc[idx]), float(stab_sc[idx])
+                result = score_peptide(
+                    pep, amp_i, tox_i, stab_i,
+                    previous_peptides=island,
+                    agent=isl_agent if USE_AGENT else None,
+                    archive_kmers=archive_kmers,
+                    pyamp=None,
+                )
+                amp_v, tox_v, stab_v, fitness, sol, agg, pI, boman, net_charge, hydrophobicity, sol_tag, agg_tag, realism_score, hydro_moment = result
+                mic_score = predict_mic_score(pep)
+                update_salient_motifs(pep, fitness)
+                map_elites_update(map_elites_grids[isl_idx], pep, fitness)
+                tag = assess_peptide_quality(pep)
+                scores.append((
+                    pep, amp_v, tox_v, stab_v, sol, agg, pI, boman,
+                    net_charge, hydrophobicity, sol_tag, agg_tag,
+                    fitness, realism_score, tag,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    hydro_moment, mic_score,
+                ))
 
-        scores = []
-        for idx, pep in enumerate(population):
-            amp_int = float(amp_scores[idx])
-            tox_int = float(tox_scores[idx])
-            stab_int = float(stab_scores[idx])
+            isl_df = pd.DataFrame(scores, columns=[
+                'Peptide',
+                'AMP_Score', 'Toxicity_Score', 'Stability_Score',
+                'Solubility_Score', 'Aggregation_Risk', 'Isoelectric_Point',
+                'Boman_Index', 'Net_Charge', 'Hydrophobicity',
+                'Solubility_Tag', 'Aggregation_Tag',
+                'Fitness_Score', 'Realism_Score', 'Quality_Tag',
+                'PyAMPA_AMP', 'PyAMPA_Toxicity', 'PyAMPA_Hemolysis', 'PyAMPA_CPP',
+                'Surprise_AMP', 'Surprise_Toxicity',
+                'Hydrophobic_Moment', 'MIC_Score',
+            ])
+            isl_df['Generation'] = gen
+            isl_df['Island']     = isl_idx
+            island_dfs.append(isl_df)
 
+        # ── Combine for global logging/stats ────────────────────────────
+        generation_df = pd.concat(island_dfs, ignore_index=True)
+        population    = generation_df['Peptide'].tolist()
 
-
-            py = None
-            
-            # Core scoring (Agent motives + PyAMPA-blended scores)
-            amp, tox, stab, fitness, sol, agg, pI, boman, net_charge, hydrophobicity, sol_tag, agg_tag, realism_score, hydro_moment = score_peptide(
-                pep,
-                amp_int, tox_int, stab_int,
-                previous_peptides=population,
-                agent=agent if USE_AGENT else None,
-                archive_kmers=archive_kmers,
-                pyamp=py,
-            )
-
-
-
-            surprise_amp = 0.0
-            surprise_tox = 0.0
-            mic_score = predict_mic_score(pep)
-
-            update_salient_motifs(pep, fitness)
-            map_elites_update(map_elites_grid, pep, fitness)
-
-            tag = assess_peptide_quality(pep)
-
-            scores.append((
-                pep, amp, tox, stab, sol, agg, pI, boman,
-                net_charge, hydrophobicity, sol_tag, agg_tag,
-                fitness, realism_score, tag,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                surprise_amp,
-                surprise_tox,
-                hydro_moment,
-                mic_score,
-            ))
-
-
-
-        generation_df = pd.DataFrame(scores, columns=[
-            'Peptide',
-            'AMP_Score', 'Toxicity_Score', 'Stability_Score',
-            'Solubility_Score', 'Aggregation_Risk', 'Isoelectric_Point',
-            'Boman_Index', 'Net_Charge', 'Hydrophobicity',
-            'Solubility_Tag', 'Aggregation_Tag',
-            'Fitness_Score', 'Realism_Score', 'Quality_Tag',
-            'PyAMPA_AMP', 'PyAMPA_Toxicity', 'PyAMPA_Hemolysis', 'PyAMPA_CPP',
-            'Surprise_AMP', 'Surprise_Toxicity',
-            'Hydrophobic_Moment',
-            'MIC_Score',
-        ])
-
-
-        # update novelty archive with this generation
+        # Novelty archive update
         archive_add_sequences(generation_df["Peptide"].tolist(), k=ARCHIVE_K)
 
-        # === Update Peptide World Model from this generation (agent only) ===
+        # World model update (uses combined data)
         if USE_AGENT:
             pwm_add_samples(generation_df)
             pwm_train_one_epoch()
 
-
-        generation_df["Generation"] = gen
-
-        # Track generation fitness stats
-        avg_fitness = generation_df['Fitness_Score'].mean()
-        max_fitness = generation_df['Fitness_Score'].max()
-
-        std_fitness = generation_df['Fitness_Score'].std()
-
-        # 🧬 Log trait drift over time
-        avg_charge = generation_df['Net_Charge'].mean()
-        avg_hydro = generation_df['Hydrophobicity'].mean()
-        avg_agg = generation_df['Aggregation_Risk'].mean()
-        avg_realism = generation_df['Realism_Score'].mean()
-
-        if avg_realism < 0.10 and gen > 20:
-            print("❌ Avg realism extremely low (<0.10) — stopping to avoid total collapse.")
-            break
-
-        # ✅ REALISM JUNK CUT (soft gate)
-        # Be lenient early while population bootstraps, tighten after gen 20
+        # Junk cut
         junk_cut = 0.05 if gen <= 20 else 0.10
         avg_realism = generation_df['Realism_Score'].mean()
-
-        pre = len(generation_df)
         generation_df = generation_df[generation_df["Realism_Score"] >= junk_cut].copy()
-        post = len(generation_df)
-        if post < pre:
-            pass  # applied silently
-            pass  # junk cut applied silently
+
+        avg_fitness = generation_df['Fitness_Score'].mean()
+        max_fitness = generation_df['Fitness_Score'].max()
+        std_fitness = generation_df['Fitness_Score'].std()
+        avg_charge  = generation_df['Net_Charge'].mean()
+        avg_hydro   = generation_df['Hydrophobicity'].mean()
+        avg_agg     = generation_df['Aggregation_Risk'].mean()
+
+        if avg_realism < 0.10 and gen > 20:
+            print("❌ Avg realism extremely low — stopping.")
+            break
+
         if gen == 1:
-            with open(trait_log_path, 'w') as trait_log:
-                trait_log.write("Generation,NetCharge,Hydrophobicity,AggregationRisk,Realism\n")
-        # Append data each generation
-        with open(trait_log_path, 'a') as trait_log:
-            trait_log.write(f"{gen},{avg_charge:.4f},{avg_hydro:.4f},{avg_agg:.4f},{avg_realism:.4f}\n")
+            with open(trait_log_path, 'w') as f:
+                f.write("Generation,NetCharge,Hydrophobicity,AggregationRisk,Realism\\n")
+        with open(trait_log_path, 'a') as f:
+            f.write(f"{gen},{avg_charge:.4f},{avg_hydro:.4f},{avg_agg:.4f},{avg_realism:.4f}\\n")
 
         print(f"📊 Std Dev Fitness: {std_fitness:.4f}")
 
-        # 🔍 Similarity / novelty stats
         avg_sim, min_sim, max_sim = similarity_stats(population)
         gen_time = datetime.now() - gen_start
-        next_mode = agent.maybe_switch_goal_mode(stagnant_generations, avg_sim, avg_realism) if USE_AGENT and agent else "normal"
-        mode = next_mode
 
+        # Goal mode for primary agent
+        if USE_AGENT and agent is not None:
+            mode = agent.maybe_switch_goal_mode(stagnant_generations, avg_sim, avg_realism)
 
-
-
-        # 🧠 World-model learning diagnostics
         if USE_AGENT:
             total_err = log_world_model_error(generation_df, gen)
-            if total_err is None:
-                total_err = 999.0
+            if total_err is None: total_err = 999.0
         else:
-            total_err = 0.0  # no world model in baseline mode
+            total_err = 0.0
 
-        # Chaos trigger:
-        # A) converged & PWM confident  -> classic chaos mode
-        # B) extremely converged even if PWM unsure -> emergency chaos
         confident_chaos = (avg_sim > 0.70 and total_err < 0.18)
-        emergency_chaos = (avg_sim > 0.78 and stagnant_generations > 40)  # tweak if needed
+        emergency_chaos = (avg_sim > 0.78 and stagnant_generations > 40)
         low_diversity_flag = confident_chaos or emergency_chaos
 
-
         with open(SIMILARITY_LOG_PATH, 'a') as sim_log:
-            if gen == 1:
-                sim_log.write("Generation,Similarity\n")
-            sim_log.write(f"{gen},{avg_sim:.4f}\n")
+            if gen == 1: sim_log.write("Generation,Similarity\\n")
+            sim_log.write(f"{gen},{avg_sim:.4f}\\n")
 
-
-        # 🌱 Novelty & entropy logs
         log_novelty_stats(avg_sim, min_sim, max_sim, gen)
         log_entropy_stats(population, gen)
 
+        # Niche clearing: if population has converged hard, archive the dominant cluster
+        # and activate penalty to discourage re-convergence to the same scaffold
+        global niche_archive, niche_penalty_active
+        if avg_sim > 0.75 and niche_penalty_active == 0:
+            top_seqs = generation_df.sort_values('Fitness_Score', ascending=False).head(20)['Peptide'].tolist()
+            dominant_kmers = set()
+            for s in top_seqs:
+                dominant_kmers.update(kmer_set(s, ARCHIVE_K))
+            niche_archive.append((dominant_kmers, float(generation_df['Fitness_Score'].max())))
+            niche_penalty_active = NICHE_PENALTY_GENS
+            print(f"🔴 Niche cleared at gen {gen} (avg_sim={avg_sim:.3f}). Penalty active for {NICHE_PENALTY_GENS} gens.")
+
         mean_H, max_H = compute_population_entropy(population)
 
-        # 🛡️ Early convergence guard: if population collapses too soon, inject exploration
         if gen < 30 and avg_sim > 0.55:
-            print(f"⚠️ Early convergence detected (avg_sim={avg_sim:.3f}) — injecting exploratory peptides.")
-            extra = [
-                ''.join(random.choices(amino_acids, k=peptide_length))
-                for _ in range(int(0.2 * population_size))
-            ]
+            print(f"⚠️ Early convergence (avg_sim={avg_sim:.3f}) — injecting exploratory peptides.")
+            extra = [''.join(random.choices(amino_acids, k=peptide_length))
+                     for _ in range(int(0.2 * population_size))]
             extra = [p for p in extra if is_realistic(p, gen)]
             population.extend(extra)
-            # Recompute similarity roughly (we don't need to log again)
 
         if gen % 50 == 0:
             top_peps_path = f"data/top_peptides_gen_{gen:04d}_{RUN_TAG}.csv"
             generation_df.head(5).to_csv(top_peps_path, index=False)
             print(f"🏅 Saved top peptides snapshot: {top_peps_path}")
 
-        # === Dynamic decay over time ===
-        initial_mutation = 0.4
-        final_mutation = 0.08
-        decay_duration = generations  # Total generations to decay across
-
-        # Cosine decay curve
-        cosine_decay = 0.5 * (1 + math.cos(math.pi * min(gen / decay_duration, 1.0)))
+        # Mutation rate schedule
+        initial_mutation = 0.4; final_mutation = 0.08
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * min(gen / generations, 1.0)))
         base_mutation = final_mutation + (initial_mutation - final_mutation) * cosine_decay
-
-        # === Adaptive tweak based on similarity and stagnation ===
-        if avg_sim > 0.65:
-            mutation_rate = base_mutation * 1.2
-        elif avg_sim < 0.5:
-            mutation_rate = base_mutation * 0.8
-        else:
-            mutation_rate = base_mutation
-
-        # === Realism Penalty Slope ===
-        realism_weight = min(max(avg_realism, 0.4), 1.0)
-        mutation_rate *= realism_weight
-
+        mutation_rate = base_mutation * (1.2 if avg_sim > 0.65 else 0.8 if avg_sim < 0.5 else 1.0)
+        mutation_rate *= min(max(avg_realism, 0.4), 1.0)
         if stagnant_generations > 100:
             boost = min(0.1 + stagnant_generations / 1000, 0.5)
             mutation_rate = min(0.6, mutation_rate + boost)
-
-        # Late-stage convergence clamp
         if gen > 0.7 * generations:
             mutation_rate = min(mutation_rate, 0.18)
-
-        # Hard clamp: keep a decent floor and prevent absurd spikes
         mutation_rate = float(np.clip(mutation_rate, 0.10, 0.65))
 
-        print(f"\n{'-'*60}")
+        print(f"\\n{'-'*60}")
         print(f"🌱 Generation {gen}")
         print(f"{'-'*60}")
         print(f"📈 Avg Fitness: {avg_fitness:.4f} | Best: {max_fitness:.4f}")
         print(f"⏱️ Runtime: {gen_time.total_seconds():.2f}s")
 
-        # Print top 3 peptides compactly
-        print("\n🏅 Top Peptides:")
-        top_peptides = generation_df.sort_values(by='Fitness_Score', ascending=False).head(3)
+        print("\\n🏅 Top Peptides:")
+        top_peptides = generation_df.sort_values('Fitness_Score', ascending=False).head(3)
+        for rank, (_, row) in enumerate(top_peptides.iterrows(), 1):
+            isl = int(row.get('Island', -1))
+            print(f"  {rank}. {row['Peptide']} | Fit: {row['Fitness_Score']:.4f} | Island {isl}")
 
-        for rank, (_, row) in enumerate(top_peptides.iterrows(), start=1):
-            print(f"  {rank}. {row['Peptide']} | Fit: {row['Fitness_Score']:.4f}")
-
-        # Global best tracking
-        top_row = generation_df.sort_values(by='Fitness_Score', ascending=False).iloc[0]
+        top_row = generation_df.sort_values('Fitness_Score', ascending=False).iloc[0]
         if top_row['Fitness_Score'] > global_best_score:
-            global_best_score = top_row['Fitness_Score']
+            global_best_score   = top_row['Fitness_Score']
             global_best_peptide = top_row['Peptide']
-            print(f"💎 New global best peptide found! Fitness: {global_best_score:.4f}")
-            print(f"🧬 Sequence: {global_best_peptide}")
+            print(f"💎 New global best! Fitness: {global_best_score:.4f} — {global_best_peptide}")
 
-        print(f"🔬 Average similarity in Generation {gen}: {avg_sim:.4f}")
-        me_filled, me_total, me_mean, me_max = map_elites_stats(map_elites_grid)
-        print(f"🗺️  MAP-Elites: {me_filled}/{me_total} cells filled | mean fit: {me_mean:.4f} | best: {me_max:.4f}")
-        top5_mean = generation_df.sort_values(by='Fitness_Score', ascending=False) \
+        print(f"🔬 Avg similarity: {avg_sim:.4f}")
+
+        # Aggregate MAP-Elites stats across all island grids
+        all_grid_entries = [entry for g in map_elites_grids for entry in g.values()]
+        me_filled = len(all_grid_entries)
+        me_total = len(CHARGE_BINS) * len(HYDRO_BINS)
+        me_mean = float(np.mean([e[0] for e in all_grid_entries])) if all_grid_entries else 0.0
+        me_max  = float(np.max([e[0]  for e in all_grid_entries])) if all_grid_entries else 0.0
+        print(f"🗺️  MAP-Elites: {me_filled}/{me_total} cells | mean: {me_mean:.4f} | best: {me_max:.4f}")
+
+        top5_mean = generation_df.sort_values('Fitness_Score', ascending=False) \\
                          .head(5)['Fitness_Score'].mean()
 
-        print(f"⏱️ Gen {gen} runtime: {gen_time.total_seconds():.2f}s")
-
         if stagnant_generations % 100 == 0 and stagnant_generations > 0:
-            print(f"⚠️  {stagnant_generations} stagnant generations (no improvement in top-5 mean)")
+            print(f"⚠️  {stagnant_generations} stagnant generations")
 
-        IMPROVEMENT_EPS = 0.002  # or 0.005
-
-        if top5_mean > best_fitness_so_far + IMPROVEMENT_EPS:
+        if top5_mean > best_fitness_so_far + 0.002:
             best_fitness_so_far = top5_mean
             stagnant_generations = 0
         else:
             stagnant_generations += 1
 
-        if USE_AGENT and agent is not None:
-            agent.update_progress(
-                top5_mean=top5_mean,
-                best_so_far=best_fitness_so_far,
-                avg_sim=avg_sim,
-                avg_novelty=1.0 - avg_sim,
-            )
+        if USE_AGENT:
+            for isl_agent in (agents if (USE_ISLANDS and agents) else [agent]):
+                isl_agent.update_progress(top5_mean, best_fitness_so_far, avg_sim, 1.0 - avg_sim)
 
-
-        # 🧱 Dynamic early-stop conditions:
-        # 1) Don't even consider early stopping before some minimum fraction of the run.
-        # 2) Only stop if we've reached a reasonable fitness regime (not stagnating in garbage).
-                
-        # Extra guards so we don't stop while still diverse or still "hot"
-        min_gen_for_stop      = int(0.40 * generations)  # don't even consider before 40% done
-        min_quality_for_stop  = 0.60
-        min_div_for_stop      = 0.65   # require reasonably converged population
-        min_mut_for_stop      = 0.20   # loosened from 0.12 — was triggering premature stops
-
-        if (
-            gen >= min_gen_for_stop
-            and best_fitness_so_far >= min_quality_for_stop
-            and stagnant_generations >= STAGNANT_LIMIT
-            and avg_sim >= min_div_for_stop
-            and mutation_rate <= min_mut_for_stop
-        ):
-            print(
-                f"🛑 Early stopping: No fitness improvement for {stagnant_generations} generations "
-                f"(limit={STAGNANT_LIMIT}), avg_sim={avg_sim:.2f}, "
-                f"mutation_rate={mutation_rate:.3f}."
-            )
+        # Early stop check
+        min_gen_for_stop = int(0.40 * generations)
+        if (gen >= min_gen_for_stop
+                and best_fitness_so_far >= 0.60
+                and stagnant_generations >= STAGNANT_LIMIT
+                and avg_sim >= 0.65
+                and mutation_rate <= 0.20):
+            print(f"🛑 Early stopping at gen {gen}.")
             break
 
-        # 🔄 Self-referential chaos update (agent only)
-        if USE_AGENT and agent is not None:
-            agent.adapt_chaos(
-                stagnant_generations,
-                avg_sim=avg_sim,
-                total_err=total_err,
-                avg_realism=avg_realism,
-            )
+        if USE_AGENT:
+            for isl_agent in (agents if (USE_ISLANDS and agents) else [agent]):
+                isl_agent.adapt_chaos(stagnant_generations, avg_sim, total_err, avg_realism)
 
-        # 🔁 Log mutation rate and checkpoint info
-        print(f"🧬 Mutation rate for Gen {gen}: {mutation_rate:.2f}")
+        print(f"🧬 Mutation rate: {mutation_rate:.2f}")
         if gen % 100 == 0:
-            print(f"📌 Checkpoint: Gen {gen}, Top Fitness: {top_row['Fitness_Score']:.4f}")
+            print(f"📌 Checkpoint Gen {gen}, Top: {top_row['Fitness_Score']:.4f}")
 
         append_mutation_rate(gen, mutation_rate)
         append_generation_to_master(gen, generation_df.to_dict('records'))
+        generation_df.to_csv(THIS_RUN_FILE, mode='a',
+                             header=not os.path.exists(THIS_RUN_FILE), index=False)
 
-        # Also log this generation to the run-specific file
+        # ── Per-island reproduction ─────────────────────────────────────
+        new_islands = []
+        for isl_idx, (island, isl_df) in enumerate(zip(islands, island_dfs)):
+            isl_agent = agents[isl_idx] if (USE_ISLANDS and agents) else agent
 
-        generation_df.to_csv(
-            THIS_RUN_FILE,
-            mode='a',
-            header=not os.path.exists(THIS_RUN_FILE),
-            index=False
-        )
+            # Island-level survivor selection from MAP-Elites + top island seqs
+            grid_seqs = [v[1] for v in map_elites_grids[isl_idx].values()]
+            top_isl   = isl_df.sort_values('Fitness_Score', ascending=False) \\
+                              .head(len(island) // 4)['Peptide'].tolist()
+            survivors = list(dict.fromkeys(grid_seqs + top_isl))
+            if not survivors:
+                survivors = isl_df.sort_values('Fitness_Score', ascending=False) \\
+                                  .head(len(island) // 2)['Peptide'].tolist()
 
-        # MAP-Elites selection: pull best from each filled cell
-        # plus top sequences from current generation for exploitation
-        grid_seqs = [v[1] for v in map_elites_grid.values()]
+            # Realism gate
+            filtered_df = isl_df[isl_df['Peptide'].isin(survivors)].copy()
+            if len(filtered_df) < len(island) // 4:
+                filtered_df = isl_df.sort_values('Fitness_Score', ascending=False) \\
+                                     .head(len(island) // 4)
 
-        # Also keep top 25% of current generation for exploitation
-        top_gen = generation_df.sort_values(
-            by="Fitness_Score", ascending=False
-        ).head(population_size // 4)['Peptide'].tolist()
+            weights = get_survivor_weights(survivors, filtered_df,
+                                           min_realism_gate=0.10, realism_power=2.0)
+            if len(weights) != len(survivors) or sum(weights) <= 0:
+                weights = [1.0] * len(survivors)
 
-        # Combine grid elites + top generation, deduplicate
-        elite_pool = list(dict.fromkeys(grid_seqs + top_gen))
+            island_target = len(island)  # maintain island size
+            new_pop = []
+            attempts = 0
 
-        # Build filtered_df from elite pool for downstream weight calculation
-        filtered_df = generation_df[generation_df['Peptide'].isin(elite_pool)].copy()
-        if len(filtered_df) < population_size // 4:
-            filtered_df = generation_df.sort_values(
-                by="Fitness_Score", ascending=False
-            ).head(population_size // 4)
+            while len(new_pop) < island_target:
+                attempts += 1
+                if attempts > 3000:
+                    new_pop.append(''.join(random.choices(amino_acids, k=peptide_length)))
+                    attempts = 0
+                    continue
 
-        print(f"🗺️  MAP-Elites survivors: {len(filtered_df)} from {me_filled} cells")
+                # Chaos injection
+                if low_diversity_flag and random.random() < 0.35:
+                    base = random.choice(survivors)
+                    cm = min(mutation_rate * (1.8 if emergency_chaos and total_err > 0.25 else 2.5), 0.60)
+                    wc = smart_mutate(base, cm)
+                    if is_realistic(wc, gen) and novelty_floor_check(wc, archive_kmers):
+                        new_pop.append(wc)
+                        with open(ACTION_LOG, 'a') as f: f.write(f"{gen},chaos_mutate\\n")
+                        continue
 
-        # 🧠 Agent adapts motives + meta-cognition (agent only)
-        if USE_AGENT and agent is not None:
-            agent.update_weights(generation_df)
+                # Crossover
+                if random.random() < 0.5 and len(survivors) >= 2:
+                    try:
+                        if random.random() < explore_parent_prob:
+                            p1, p2 = random.choice(survivors), random.choice(survivors)
+                        elif random.random() < 0.5:
+                            p1 = tournament_pick(survivors, isl_df, k=tournament_k)
+                            p2 = tournament_pick(survivors, isl_df, k=tournament_k)
+                        else:
+                            p1, p2 = random.choices(survivors, weights=weights, k=2)
 
-            # 🪞 Periodic meta-cognition: slower, self-reflective remapping
-            if gen % META_INTROSPECTION_INTERVAL == 0:
-                avg_novelty = 1.0 - avg_sim
-                max_H_theoretical = math.log2(len(amino_acids))
-                diversity_norm = 0.0
-                if max_H_theoretical > 0:
-                    diversity_norm = max(0.0, min(1.0, mean_H / max_H_theoretical))
+                        tries = 0
+                        while jaccard_kmer_similarity(p1, p2) > 0.85 and tries < 5:
+                            p2 = random.choice(survivors); tries += 1
 
-                meta_signals = {
-                    "plateau": min(stagnant_generations / STAGNANT_LIMIT, 1.0),
-                    "novelty": max(0.0, min(1.0, avg_novelty)),
-                    "diversity": diversity_norm,
-                    "salience_entropy": salience_entropy(),
-                    "chaos": max(0.0, min(1.0, 4.0 * agent.z * (1.0 - agent.z))),
-                }
-                agent.introspect_and_remap(meta_signals)
+                    except ValueError:
+                        weights = [1.0] * len(survivors)
+                        p1, p2 = random.choices(survivors, weights=weights, k=2)
 
-            # Always clamp + renormalize
-            agent.w = np.maximum(agent.w, 1e-6)
-            agent.w = agent.w / agent.w.sum()
+                    child = crossover(p1, p2)
+                    enc   = np.array([encode_int(child, max_len=max_len)])
+                    amp_c = float(amp_model.predict(enc, verbose=0)[0][0])
+                    tox_c = float(toxicity_model.predict(enc, verbose=0)[0][0])
+                    stab_c = float(stability_model.predict(enc, verbose=0)[0][0])
+                    cf    = score_peptide(child, amp_c, tox_c, stab_c,
+                                          agent=isl_agent if USE_AGENT else None)[3]
 
-            # 🔒 Global curiosity cap + AMP/safety floor
-            cur_idx = agent.motives.index("curiosity")
-            amp_idx = agent.motives.index("amp")
-            saf_idx = agent.motives.index("safety")
+                    f1 = isl_df[isl_df['Peptide'] == p1]['Fitness_Score'].values
+                    f2 = isl_df[isl_df['Peptide'] == p2]['Fitness_Score'].values
+                    if f1.size > 0 and f2.size > 0:
+                        if cf >= 0.65 * max(f1[0], f2[0]) and is_realistic(child, gen) \\
+                                and novelty_floor_check(child, archive_kmers):
+                            new_pop.append(child)
+                            with open(ACTION_LOG, 'a') as f: f.write(f"{gen},crossover\\n")
+                            continue
 
-            agent.w[cur_idx] = min(agent.w[cur_idx], agent.MAX_CUR)
+                # Mutation
+                parent = random.choice(survivors)
+                if USE_AGENT and isl_agent is not None:
+                    mutant, reasons, source = cognitive_mutate(
+                        parent, mutation_rate, isl_agent,
+                        amp_model, toxicity_model, stability_model,
+                        archive_kmers, peptide_length)
+                    if is_realistic(mutant, gen) and novelty_floor_check(mutant, archive_kmers):
+                        new_pop.append(mutant)
+                        with open(REASON_LOG, 'a') as f:
+                            f.write(f"{gen},{parent},{mutant},{source},"
+                                    f"{reasons['amp']:.4f},{reasons['safety']:.4f},"
+                                    f"{reasons['stability']:.4f},{reasons['realism']:.4f},"
+                                    f"{reasons['novelty']:.4f},"
+                                    f"{isl_agent.reason_score(reasons):.4f}\\n")
+                        with open(ACTION_LOG, 'a') as f: f.write(f"{gen},mutate_{source}\\n")
+                        continue
+                else:
+                    mutant = smart_mutate(parent, mutation_rate)
+                    if is_realistic(mutant, gen) and novelty_floor_check(mutant, archive_kmers):
+                        new_pop.append(mutant)
+                        with open(ACTION_LOG, 'a') as f: f.write(f"{gen},mutate_smart\\n")
+                        continue
 
-            min_amp_saf = 0.30
-            s = agent.w[amp_idx] + agent.w[saf_idx]
-            if s < min_amp_saf:
-                boost = (min_amp_saf - s) / 2.0
-                agent.w[amp_idx] += boost
-                agent.w[saf_idx] += boost
+            new_islands.append(new_pop)
+            print(f"✅ Island {isl_idx}: built {len(new_pop)} sequences")
 
-            agent.w = np.maximum(agent.w, agent.MIN_W)
-            agent.w = agent.w / agent.w.sum()
+        # ── Agent updates (per-island) ──────────────────────────────────
+        if USE_AGENT:
+            for isl_idx, isl_df in enumerate(island_dfs):
+                isl_agent = agents[isl_idx] if (USE_ISLANDS and agents) else agent
+                isl_agent.update_weights(isl_df)
+                if gen % META_INTROSPECTION_INTERVAL == 0:
+                    avg_novelty = 1.0 - avg_sim
+                    max_H_th    = math.log2(len(amino_acids))
+                    div_norm    = max(0.0, min(1.0, mean_H / max_H_th)) if max_H_th > 0 else 0.0
+                    isl_agent.introspect_and_remap({
+                        "plateau":          min(stagnant_generations / STAGNANT_LIMIT, 1.0),
+                        "novelty":          max(0.0, min(1.0, avg_novelty)),
+                        "diversity":        div_norm,
+                        "salience_entropy": salience_entropy(),
+                        "chaos":            max(0.0, min(1.0, 4.0 * isl_agent.z * (1.0 - isl_agent.z))),
+                    })
+                isl_agent.w = np.maximum(isl_agent.w, 1e-6)
+                isl_agent.w /= isl_agent.w.sum()
+                cur_idx = isl_agent.motives.index("curiosity")
+                amp_idx = isl_agent.motives.index("amp")
+                saf_idx = isl_agent.motives.index("safety")
+                isl_agent.w[cur_idx] = min(isl_agent.w[cur_idx], isl_agent.MAX_CUR)
+                s = isl_agent.w[amp_idx] + isl_agent.w[saf_idx]
+                if s < 0.30:
+                    boost = (0.30 - s) / 2.0
+                    isl_agent.w[amp_idx] += boost
+                    isl_agent.w[saf_idx] += boost
+                isl_agent.w = np.maximum(isl_agent.w, isl_agent.MIN_W)
+                isl_agent.w /= isl_agent.w.sum()
 
-            # Log agent state
+            # Log primary agent state
             with open(AGENT_LOG, 'a') as f:
                 f.write(
                     f"{gen}," +
                     ",".join(f"{w:.5f}" for w in agent.w) +
-                    f",{agent.z:.6f}," +
-                    f"{agent.r:.4f}," +
-                    f"{stagnant_generations}," +
-                    f"{avg_sim:.4f}," +
-                    f"{mean_H:.4f}," +
-                    f"{total_err:.4f}," +
-                    f"{avg_realism:.4f}\n"
+                    f",{agent.z:.6f},{agent.r:.4f},"
+                    f"{stagnant_generations},{avg_sim:.4f},"
+                    f"{mean_H:.4f},{total_err:.4f},{avg_realism:.4f}\\n"
                 )
 
-        min_realism = 0.08 + 0.14 * min(gen / 2000, 1.0)
-
-        # MAP-Elites parent sampling:
-        # 60% from grid (biased toward empty/weak cells for exploration)
-        # 40% from top current generation (exploitation)
-        n_from_grid = int(0.6 * population_size // 2)
-        n_from_top  = population_size // 2 - n_from_grid
-
-        grid_parents = map_elites_sample(map_elites_grid, n_from_grid)
-        top_parents  = generation_df.sort_values(
-            by="Fitness_Score", ascending=False
-        ).head(n_from_top)['Peptide'].tolist()
-
-        survivors = grid_parents + top_parents
-        if not survivors:
-            survivors = generation_df.sort_values(
-                by="Fitness_Score", ascending=False
-            ).head(population_size // 2)['Peptide'].tolist()
-
-
-        # ✅ Patch: Inject fallback survivors if empty
-        if not survivors:
-            print("🚨 No valid survivors found — injecting new random population.")
-            survivors = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
-
-            # 🔍 Score fallback survivors for proper crossover weighting
-            encoded = np.array([encode_int(p) for p in survivors])
-            amp_scores = amp_model.predict(encoded, verbose=0).flatten()
-            tox_scores = toxicity_model.predict(encoded, verbose=0).flatten()
-            stab_scores = stability_model.predict(encoded, verbose=0).flatten()
-
-            weights = np.array([
-                score_peptide(
-                    p,
-                    amp_scores[i],
-                    tox_scores[i],
-                    stab_scores[i],
-                    previous_peptides=survivors,
-                    agent=agent if USE_AGENT else None,
-                )[3]
-                for i, p in enumerate(survivors)
-            ])
-
-
-
-
-            print(f"🧪 Injected {len(survivors)} new survivors with fallback fitness scores.")
-        
-
-        # ---- compute survivor weights ONCE per generation ----
-        min_realism_gate = 0.10  # match junk_cut
-
-
-        weight_df = filtered_df if isinstance(filtered_df, pd.DataFrame) and len(filtered_df) > 0 else generation_df
-
-        weights = get_survivor_weights(
-            survivors,
-            generation_df=weight_df,
-            min_realism_gate=min_realism_gate,
-            realism_power=2.0,
-        )
-
-        # ---- SAFETY: ensure weights are valid ----
-        if len(weights) != len(survivors) or sum(weights) <= 0:
-            print("⚠️ Invalid survivor weights detected — falling back to uniform.")
-            weights = [1.0] * len(survivors)
-
-
-
-        high_sim = similarity_penalty(survivors)
-        if high_sim > 0.8:
-            print(f"⚠️ High survivor similarity detected (pairwise ~{high_sim:.2f}). Chaos mode may inject exploratory children this gen.")
-
-        # === Build next generation ===
-        new_population = []
-        attempts = 0  # 👈 already there
-
-
-        while len(new_population) < population_size:
-            attempts += 1
-
-
-            # 🚨 Emergency fallback: if we've tried too many times without filling the population,
-            # inject a random peptide (so we never get stuck in an infinite loop).
-            if attempts > 3000:
-                rand = ''.join(random.choices(amino_acids, k=peptide_length))
-                new_population.append(rand)
-                attempts = 0
-                continue
-
-            # 🌪️ Chaos children: only when low_diversity_flag is set
-            if low_diversity_flag and random.random() < 0.35:
-                base_parent = random.choice(survivors)
-
-                if emergency_chaos and total_err > 0.25:
-                    # PWM doesn't understand the regime -> don't blast too hard
-                    chaos_mutation_rate = min(mutation_rate * 1.8, 0.45)
-                else:
-                    chaos_mutation_rate = min(mutation_rate * 2.5, 0.60)
-
-                wild_child = smart_mutate(base_parent, chaos_mutation_rate)
-                if is_realistic(wild_child, gen):
-                    new_population.append(wild_child)
-                    with open(ACTION_LOG, 'a') as f:
-                        f.write(f"{gen},chaos_mutate\n")
-                    continue
-                # if wild_child fails realism, we drop through into normal path
-
-            # --- reproduction phase ---
-            if random.random() < 0.5 and len(survivors) >= 2:
-                try:
-                    mode_roll = random.random()
-
-                    # Extra exploratory branch: sometimes pick parents totally at random
-                    if random.random() < explore_parent_prob:
-                        p1 = random.choice(survivors)
-                        p2 = random.choice(survivors)
-                    elif mode_roll < 0.5:
-                        # Tournament selection (soft but biased)
-                        p1 = tournament_pick(survivors, generation_df, k=tournament_k)
-                        p2 = tournament_pick(survivors, generation_df, k=tournament_k)
-                    else:
-                        # Mix of uniform + weighted
-                        #   20% uniform (fitness-blind), 80% weighted by fitness
-                        if random.random() < 0.20:
-                            p1 = random.choice(survivors)
-                            p2 = random.choice(survivors)
-                        else:
-                            p1, p2 = random.choices(survivors, weights=weights, k=2)
-
-                    # Ensure parents aren't near-clones; try a few times
-                    tries = 0
-
-                    while jaccard_kmer_similarity(p1, p2, k=3) > 0.85 and tries < 5:
-
-                        # resample p2 (keep p1 fixed)
-                        if random.random() < explore_parent_prob:
-                            p2 = random.choice(survivors)
-                        elif mode_roll < 0.5:
-                            p2 = tournament_pick(survivors, generation_df, k=tournament_k)
-                        else:
-                            if random.random() < 0.20:
-                                p2 = random.choice(survivors)
-                            else:
-                                p2 = random.choices(survivors, weights=weights, k=1)[0]
-                        tries += 1
-
-                except ValueError as e:
-                    print(f"⚠️ Weight mismatch during crossover: {e}")
-                    # Fallback: just use equal weights so we don't crash
-                    weights = np.ones(len(survivors))
-                    p1, p2 = random.choices(survivors, weights=weights, k=2)
-
-
-                child = crossover(p1, p2)
-                int_encoded = np.array([encode_int(child)])
-                amp = float(amp_model.predict(int_encoded, verbose=0)[0][0])
-                tox = float(toxicity_model.predict(int_encoded, verbose=0)[0][0])
-                stab = float(stability_model.predict(int_encoded, verbose=0)[0][0])
-
-                child_fitness = score_peptide(
-                    child,
-                    amp,
-                    tox,
-                    stab,
-                    previous_peptides=population,
-                    agent=agent if USE_AGENT else None,
-                )[3]
-
-
-                f1 = generation_df[generation_df['Peptide'] == p1]['Fitness_Score'].values
-                f2 = generation_df[generation_df['Peptide'] == p2]['Fitness_Score'].values
-
-                if f1.size > 0 and f2.size > 0:
-                    if child_fitness >= 0.65 * max(f1[0], f2[0]) and is_realistic(child, gen):
-                        new_population.append(child)
-                        with open(ACTION_LOG, 'a') as f:
-                            f.write(f"{gen},crossover\n")
-                        continue  # go back to while loop to fill next slot
-
-
-
-
-
-            # --- cognitive mutation fallback ---
-            parent = random.choice(survivors)
-
-            if USE_AGENT and agent is not None:
-                # 🧠 Agent-guided mutation: prophet + chaos + dreamer
-                mutant, reasons, source = cognitive_mutate(
-                    parent, mutation_rate, agent,
-                    amp_model, toxicity_model, stability_model,
-                    archive_kmers, peptide_length
-                )
-                if is_realistic(mutant, gen):
-                    new_population.append(mutant)
-                    with open(REASON_LOG, 'a') as f:
-                        f.write(
-                            f"{gen},{parent},{mutant},{source},"
-                            f"{reasons['amp']:.4f},{reasons['safety']:.4f},"
-                            f"{reasons['stability']:.4f},{reasons['realism']:.4f},"
-                            f"{reasons['novelty']:.4f},{agent.reason_score(reasons):.4f}\n"
-                        )
-                    with open(ACTION_LOG, 'a') as f:
-                        f.write(f"{gen},mutate_{source}\n")
-                    continue
-            else:
-                # ⚙️ Baseline: standard smart mutation, no agent
-                mutant = smart_mutate(parent, mutation_rate)
-                if is_realistic(mutant, gen):
-                    new_population.append(mutant)
-                    with open(ACTION_LOG, 'a') as f:
-                        f.write(f"{gen},mutate_smart\n")
-                    continue
-
-        print(f"✅ Finished building next population for Generation {gen} (size={len(new_population)})")
-
+        # ── Snapshots, grid saves, wildcards ───────────────────────────
         if gen % 500 == 0:
-            snap_path = f"data/gen_{gen:04d}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-            generation_df.to_csv(snap_path, index=False)
-            print(f"💾 Snapshot saved: {snap_path}")
+            snap = f"data/gen_{gen:04d}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            generation_df.to_csv(snap, index=False)
+            print(f"💾 Snapshot: {snap}")
 
         if gen % 100 == 0:
-            grid_path = f"data/map_elites_grid_gen_{gen:04d}_{RUN_TAG}.csv"
-            grid_rows = [{'charge_bin': CHARGE_BINS[k[0]], 'hydro_bin': HYDRO_BINS[k[1]],
-                          'fitness': v[0], 'peptide': v[1]}
-                         for k, v in map_elites_grid.items()]
-            pd.DataFrame(grid_rows).to_csv(grid_path, index=False)
-            print(f"🗺️  Grid saved: {grid_path}")
+            for gi, g in enumerate(map_elites_grids):
+                grid_path = f"data/map_elites_grid_isl{gi}_gen_{gen:04d}_{RUN_TAG}.csv"
+                grid_rows = [{'charge_bin': CHARGE_BINS[k[0]], 'hydro_bin': HYDRO_BINS[k[1]],
+                              'fitness': v[0], 'peptide': v[1]}
+                             for k, v in g.items()]
+                pd.DataFrame(grid_rows).to_csv(grid_path, index=False)
+            print(f"🗺️  Per-island grids saved at gen {gen}")
 
-        # 🌪️ Exploration injection: add 5 wildcards every 250 generations
         if gen % 100 == 0 and avg_realism >= 0.6:
             wildcards = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(20)]
             wildcards = [w for w in wildcards if is_realistic(w, gen)]
-
-            n_inject = min(15, len(wildcards))
-            print(f"🧬 Injecting {n_inject} exploratory wildcards into population.")
-            new_population.extend(wildcards[:n_inject])
-
-
-            # 🛡️ Safety filter after wildcard injection
-            next_pop_encoded = np.array([encode_int(p) for p in new_population])
-            amp_scores_next = amp_model.predict(next_pop_encoded, verbose=0).flatten()
-            tox_scores_next = toxicity_model.predict(next_pop_encoded, verbose=0).flatten()
-            stab_scores_next = stability_model.predict(next_pop_encoded, verbose=0).flatten()
-
-            scored = []
-            for i, p in enumerate(new_population):
-                f = score_peptide(
-                    p,
-                    amp_scores_next[i],
-                    tox_scores_next[i],
-                    stab_scores_next[i],
-                    previous_peptides=new_population,
-                    agent=agent if USE_AGENT else None,
-                )[3]
-                scored.append((p, f))
-
-
-
-            # Drop bottom 20%
-            scored.sort(key=lambda x: x[1], reverse=True)
-            filtered = [p for p, _ in scored[:int(0.8 * len(scored))]]
-            new_population = filtered
+            n_inject  = min(15, len(wildcards))
+            if n_inject > 0:
+                # Spread wildcards across islands
+                per_island = max(1, n_inject // N_ISLANDS)
+                for i in range(len(new_islands)):
+                    new_islands[i].extend(wildcards[i*per_island:(i+1)*per_island])
+                print(f"🧬 Injected {n_inject} wildcards across islands")
 
         if stagnant_generations > 100:
-            print(f"🔥 Injecting anti-stagnation wildcard batch after {stagnant_generations} stagnant generations.")
+            print(f"🔥 Anti-stagnation batch after {stagnant_generations} stagnant gens.")
             wild_batch = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(30)]
-            filtered = [w for w in wild_batch if is_realistic(w, gen)]
-            print(f"🧪 {len(filtered[:10])} wildcards passed realism checks.")
-            new_population.extend(filtered[:10])
+            filtered_w = [w for w in wild_batch if is_realistic(w, gen)][:10]
+            print(f"🧪 {len(filtered_w)} wildcards passed realism.")
+            # Spread across islands
+            for i, w in enumerate(filtered_w):
+                new_islands[i % len(new_islands)].append(w)
 
-        with open(FITNESS_STATS_FILE, 'a') as stat_file:
-            if gen == 1:
-                stat_file.write("Generation,AvgFitness,MaxFitness,StdFitness\n")
-            stat_file.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f}\n")
+        # Niche penalty countdown
+        if niche_penalty_active > 0:
+            niche_penalty_active -= 1
 
+        with open(FITNESS_STATS_FILE, 'a') as f:
+            if gen == 1: f.write("Generation,AvgFitness,MaxFitness,StdFitness\\n")
+            f.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f}\\n")
 
-        if not USE_ISLANDS:
-            population = new_population
-        save_population(population)
+        islands = new_islands
+        save_population([p for isl in islands for p in isl])
 
-
-        # 🏝️ Island migration
+        # ── Migration ──────────────────────────────────────────────────
         if USE_ISLANDS and gen % MIGRATION_INTERVAL == 0:
-            # Re-sort each island by fitness before migration
-            island_size = population_size // N_ISLANDS
-            for i in range(N_ISLANDS):
-                isle_peps = new_population[i*island_size:(i+1)*island_size]
-                if len(isle_peps) > 0:
-                    islands[i] = isle_peps
             islands = migrate_islands(islands, MIGRATION_RATE)
             print(f"🏝️  Migration at gen {gen}: {N_ISLANDS} islands exchanged migrants")
-        elif USE_ISLANDS:
-            # Redistribute new_population back into islands
-            island_size = len(new_population) // N_ISLANDS
-            islands = [new_population[i*island_size:(i+1)*island_size] for i in range(N_ISLANDS)]
-        else:
-            population = new_population
 
-
-        # 🛑 Check for early stop request
         if check_early_stop():
-            print("🛑 Early stop signal detected (stop.txt). Finalizing run gracefully...")
+            print("🛑 stop.txt detected — finalizing.")
             os.remove(EARLY_STOP_FILE)
             break
 
