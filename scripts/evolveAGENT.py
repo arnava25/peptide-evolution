@@ -594,14 +594,13 @@ def score_peptide(
     gated = value * structure_bonus * turing_bonus * niche_penalty_score(peptide) * entropy_bonus * nov_bonus * crowd_pen
 
     gated = max(0.0, gated - disagreement_penalty)
+    gated = float(_clamp(gated, 0.0, 1.0))  # hard clamp before compression
 
-    # --- Softplus compression (preserves resolution at the top unlike logistic) ---
-    # softplus(x) = log(1 + exp(x)), scaled to [0,1]
-    # This keeps meaningful fitness differences between 0.85 and 0.95 sequences 
+    # --- Softplus compression ---
     scale = 6.0
-    shifted = gated - 0.85
+    shifted = gated - 0.55
     sp = math.log(1.0 + math.exp(_clamp(scale * shifted, -60.0, 60.0)))
-    sp_max = math.log(1.0 + math.exp(scale * 0.15))
+    sp_max = math.log(1.0 + math.exp(scale * 0.45))
     fitness = float(_clamp(sp / sp_max, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
