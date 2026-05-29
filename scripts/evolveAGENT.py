@@ -595,6 +595,9 @@ def score_peptide(
 
     gated = max(0.0, gated - disagreement_penalty)
     gated = float(_clamp(gated, 0.0, 1.0))  # hard clamp before compression
+    # Quality gate: penalize if core objectives aren't jointly satisfied
+    if amp_score < 0.5 or (1.0 - tox_score) < 0.4 or stab_score < 0.4:
+        gated *= 0.4  # heavy penalty for sequences weak on any core objective
 
     # --- Softplus compression ---
     scale = 6.0
