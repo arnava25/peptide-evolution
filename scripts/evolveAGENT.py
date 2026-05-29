@@ -1020,8 +1020,8 @@ def archive_novelty_bonus(peptide: str, archive_kmers, k: int = ARCHIVE_K) -> fl
         return 1.0  # early in run, no penalty
     nov = novelty_vs_archive(peptide, archive_kmers, k=k, sample_n=200)
     # linear mapping: nov 0→0.75, nov 0.5→1.0, nov 1.0→1.25
-    bonus = 0.75 + 0.50 * nov
-    return float(_clamp(bonus, 0.75, 1.25))
+    bonus = 0.85 + 0.20 * nov
+    return float(_clamp(bonus, 0.85, 1.05))
 
 
 def similarity_penalty(pop, k: int = 3):
