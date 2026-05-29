@@ -95,7 +95,9 @@ EARLY_STOP_FILE = 'stop.txt'
 # 👁️ Attentional motif salience memory
 salient_motifs = {}  # Stores k-mers and their evolving salience values
 
-
+# Positional entropy state — updated each generation, used in score_peptide
+_position_entropy: list[float] = []   # entropy per position, populated by update_position_entropy()
+_ENTROPY_BONUS_WEIGHT = 0.04          # how much positional rarity boosts fitness
 
 from tensorflow.keras import layers, models, optimizers
 
@@ -535,23 +537,26 @@ def score_peptide(
         novelty = novelty_vs_archive(peptide, archive_kmers, k=ARCHIVE_K, sample_n=ARCHIVE_SAMPLE_N)
 
 
+    # --- MIC score (now trained on 13mer data, include in fitness) ---
+    mic_score = predict_mic_score(peptide)
+
     # --- Weights ---
     if agent is not None:
         m = agent.motives
         w_amp    = agent.w[m.index("amp")]
         w_safety = agent.w[m.index("safety")]
         w_stab   = agent.w[m.index("stability")]
-        w_real = agent.w[m.index("realism")]
+        w_real   = agent.w[m.index("realism")]
         w_novel  = agent.w[m.index("novelty")]
         w_quality = 0.5 * (w_amp + w_safety)
+        w_mic    = 0.08  # fixed small weight — MIC is a bonus objective
     else:
         w_amp, w_safety, w_stab, w_quality, w_novel, w_real = 0.38, 0.27, 0.22, 0.11, 0.12, 0.0
+        w_mic = 0.08
 
-    weights = np.array([w_amp, w_safety, w_stab, w_quality, w_novel, w_real], dtype=float)
+    weights = np.array([w_amp, w_safety, w_stab, w_quality, w_novel, w_real, w_mic], dtype=float)
     weights = weights / weights.sum()
-    w_amp, w_safety, w_stab, w_quality, w_novel, w_real = weights
-
-
+    w_amp, w_safety, w_stab, w_quality, w_novel, w_real, w_mic = weights
 
     # --- Core Value ---
     value = (
@@ -560,22 +565,36 @@ def score_peptide(
         w_stab    * stab_score +
         w_quality * quality_score +
         w_novel   * novelty +
-        w_real    * realism
+        w_real    * realism +
+        w_mic     * mic_score
     )
 
-    gated = value * structure_bonus * turing_bonus * niche_penalty_score(peptide)
+    # Positional entropy bonus: reward amino acids that are rare at their position
+    entropy_bonus = 1.0
+    global _position_entropy, _ENTROPY_BONUS_WEIGHT
+    if _position_entropy and len(_position_entropy) == len(peptide):
+        max_H = math.log2(20)  # maximum possible per-position entropy
+        # rarity at each position: low entropy = converged = rare aa gets bonus
+        rarity_scores = []
+        for pos, aa in enumerate(peptide):
+            pos_H = _position_entropy[pos]
+            convergence = max(0.0, 1.0 - pos_H / max_H)  # 1 = fully converged, 0 = diverse
+            rarity_scores.append(convergence)
+        avg_rarity = float(np.mean(rarity_scores)) if rarity_scores else 0.0
+        entropy_bonus = 1.0 + _ENTROPY_BONUS_WEIGHT * avg_rarity
 
+    gated = value * structure_bonus * turing_bonus * niche_penalty_score(peptide) * entropy_bonus
 
     gated = max(0.0, gated - disagreement_penalty)
 
-    # --- Logistic compression ---
-    beta = 1.5
-    bias = 0.35
-
-    x = beta * (gated - bias)
-    x = _clamp(x, -60.0, 60.0)
-    fitness = 1.0 / (1.0 + math.exp(-x))
-    fitness = float(_clamp(fitness, 0.0, 1.0))
+    # --- Softplus compression (preserves resolution at the top unlike logistic) ---
+    # softplus(x) = log(1 + exp(x)), scaled to [0,1]
+    # This keeps meaningful fitness differences between 0.85 and 0.95 sequences
+    scale = 6.0   # steeper curve
+    shifted = gated - 0.55  # shift midpoint higher so top scores don't saturate
+    sp = math.log(1.0 + math.exp(_clamp(scale * shifted, -60.0, 60.0)))
+    sp_max = math.log(1.0 + math.exp(scale * 0.45))  # normalizer
+    fitness = float(_clamp(sp / sp_max, 0.0, 1.0))
 
     sol_tag = "✅ Soluble" if solubility_score >= 0.5 else "🔴 Low Solubility"
     agg_tag = "✅ Safe" if aggregation_risk <= 0.5 else "🔴 Risky"
@@ -864,7 +883,31 @@ def salience_entropy():
 
     return float(H / H_max)
 
-
+def update_position_entropy(population: list[str]):
+    """
+    Compute per-position Shannon entropy across the current population.
+    Stored globally so score_peptide can apply a rarity bonus.
+    """
+    global _position_entropy
+    if not population:
+        _position_entropy = []
+        return
+    L = len(population[0])
+    n = float(len(population))
+    entropies = []
+    for pos in range(L):
+        counts: dict = {}
+        for seq in population:
+            if pos < len(seq):
+                aa = seq[pos]
+                counts[aa] = counts.get(aa, 0) + 1
+        H = 0.0
+        for c in counts.values():
+            p = c / n
+            if p > 0.0:
+                H -= p * math.log2(p)
+        entropies.append(H)
+    _position_entropy = entropies
 
 def append_mutation_rate(generation_number, mutation_rate, stagnant_gen=None):
     with open(MUTATION_HISTORY_FILE, 'a') as f:
@@ -1851,7 +1894,7 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
         parent, agent,
         archive_kmers=archive_kmers,
         target_len=target_len,
-        horizon=3, beam=8, actions_per=6
+        horizon=5, beam=16, actions_per=6
     )
     if dream is not None and dream not in seen:
         candidates.append(("dreamer", dream))
@@ -2308,6 +2351,7 @@ def run_simulation():
                     archive_kmers=archive_kmers,
                     pyamp=None,
                 )
+
                 amp_v, tox_v, stab_v, fitness, sol, agg, pI, boman, net_charge, hydrophobicity, sol_tag, agg_tag, realism_score, hydro_moment = result
                 mic_score = predict_mic_score(pep)
                 update_salient_motifs(pep, fitness)
@@ -2395,11 +2439,12 @@ def run_simulation():
 
         log_novelty_stats(avg_sim, min_sim, max_sim, gen)
         log_entropy_stats(population, gen)
+        update_position_entropy(population)
 
         # Niche clearing: if population has converged hard, archive the dominant cluster
         # and activate penalty to discourage re-convergence to the same scaffold
         global niche_archive, niche_penalty_active
-        if avg_sim > 0.75 and niche_penalty_active == 0:
+        if avg_sim > 0.55 and niche_penalty_active == 0:
             top_seqs = generation_df.sort_values('Fitness_Score', ascending=False).head(20)['Peptide'].tolist()
             dominant_kmers = set()
             for s in top_seqs:
@@ -2463,7 +2508,7 @@ def run_simulation():
         me_max  = float(np.max([e[0]  for e in all_grid_entries])) if all_grid_entries else 0.0
         print(f"🗺️  MAP-Elites: {me_filled}/{me_total} cells | mean: {me_mean:.4f} | best: {me_max:.4f}")
 
-        top5_mean = generation_df.sort_values('Fitness_Score', ascending=False) \\
+        top5_mean = generation_df.sort_values('Fitness_Score', ascending=False) \
                          .head(5)['Fitness_Score'].mean()
 
         if stagnant_generations % 100 == 0 and stagnant_generations > 0:
@@ -2492,6 +2537,9 @@ def run_simulation():
         if USE_AGENT:
             for isl_agent in (agents if (USE_ISLANDS and agents) else [agent]):
                 isl_agent.adapt_chaos(stagnant_generations, avg_sim, total_err, avg_realism)
+                # Kick z out of attractor every 100 gens with a small random perturbation
+                if gen % 100 == 0:
+                    isl_agent.z = _clamp(isl_agent.z + random.uniform(-0.15, 0.15), 0.01, 0.99)
 
         print(f"🧬 Mutation rate: {mutation_rate:.2f}")
         if gen % 100 == 0:
@@ -2509,17 +2557,17 @@ def run_simulation():
 
             # Island-level survivor selection from MAP-Elites + top island seqs
             grid_seqs = [v[1] for v in map_elites_grids[isl_idx].values()]
-            top_isl   = isl_df.sort_values('Fitness_Score', ascending=False) \\
+            top_isl   = isl_df.sort_values('Fitness_Score', ascending=False) \
                               .head(len(island) // 4)['Peptide'].tolist()
             survivors = list(dict.fromkeys(grid_seqs + top_isl))
             if not survivors:
-                survivors = isl_df.sort_values('Fitness_Score', ascending=False) \\
+                survivors = isl_df.sort_values('Fitness_Score', ascending=False) \
                                   .head(len(island) // 2)['Peptide'].tolist()
 
             # Realism gate
             filtered_df = isl_df[isl_df['Peptide'].isin(survivors)].copy()
             if len(filtered_df) < len(island) // 4:
-                filtered_df = isl_df.sort_values('Fitness_Score', ascending=False) \\
+                filtered_df = isl_df.sort_values('Fitness_Score', ascending=False) \
                                      .head(len(island) // 4)
 
             weights = get_survivor_weights(survivors, filtered_df,
@@ -2578,7 +2626,7 @@ def run_simulation():
                     f1 = isl_df[isl_df['Peptide'] == p1]['Fitness_Score'].values
                     f2 = isl_df[isl_df['Peptide'] == p2]['Fitness_Score'].values
                     if f1.size > 0 and f2.size > 0:
-                        if cf >= 0.65 * max(f1[0], f2[0]) and is_realistic(child, gen) \\
+                        if cf >= 0.65 * max(f1[0], f2[0]) and is_realistic(child, gen) \
                                 and novelty_floor_check(child, archive_kmers):
                             new_pop.append(child)
                             with open(ACTION_LOG, 'a') as f: f.write(f"{gen},crossover\\n")
