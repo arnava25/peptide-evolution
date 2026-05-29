@@ -517,18 +517,7 @@ def score_peptide(
 
     # 👽 Turing Test (Naturalness Check)
     # Uses global naturalness_model if available
-    turing_bonus = 1.0
-    global naturalness_model
-    if naturalness_model is not None:
-        try:
-            # Predict takes shape (1, 50)
-            nat_pred = float(naturalness_model.predict(encode_int(peptide, max_len=max_len).reshape(1, -1), verbose=0)[0][0])            
-            if nat_pred < 0.3:
-                turing_bonus = 0.5  # Heavy penalty for "Alien" looking junk
-            elif nat_pred > 0.8:
-                turing_bonus = 1.1  # Reward for "Natural" looking grammar
-        except Exception:
-            pass # Safety pass if model fails
+    turing_bonus = 1.0  # naturalness discriminator removed — realism_penalty_score handles this
 
 
     disagreement_penalty = 0.0
@@ -561,10 +550,10 @@ def score_peptide(
         w_real   = agent.w[m.index("realism")]
         w_novel  = agent.w[m.index("novelty")]
         w_quality = 0.5 * (w_amp + w_safety)
-        w_mic    = 0.08  # fixed small weight — MIC is a bonus objective
+        w_mic    = 0.05  # reduced — MIC model trained on longer peptides, directional only
     else:
         w_amp, w_safety, w_stab, w_quality, w_novel, w_real = 0.38, 0.27, 0.22, 0.11, 0.12, 0.0
-        w_mic = 0.08
+        w_mic = 0.05
 
     weights = np.array([w_amp, w_safety, w_stab, w_quality, w_novel, w_real, w_mic], dtype=float)
     weights = weights / weights.sum()
