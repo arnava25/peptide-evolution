@@ -1851,7 +1851,7 @@ def _estimate_deltas(candidate: str,
     int_enc = np.array([encode_int(candidate, max_len=max_len)])
     amp = float(amp_model.predict(int_enc, verbose=0)[0][0])
     tox = float(tox_model.predict(int_enc, verbose=0)[0][0])
-    stab = float(stab_model.predict(int_enc, verbose=0)[0][0])
+    stab = 0.0  # stability is heuristic now, computed inside score_peptide
 
     realism = float(realism_penalty_score(candidate))
 
