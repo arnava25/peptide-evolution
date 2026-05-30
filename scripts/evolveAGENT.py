@@ -2509,7 +2509,8 @@ def run_simulation():
             encoded = np.array([encode_int(p, max_len=max_len) for p in island])
             amp_sc  = amp_model.predict(encoded, verbose=0).flatten()
             tox_sc  = toxicity_model.predict(encoded, verbose=0).flatten()
-            stab_sc = np.zeros(len(island), dtype=float)  # placeholder — heuristic used inside score_peptide
+            stab_sc = stability_model.predict(encoded, verbose=0).flatten()
+            nat_sc  = naturalness_model.predict(encoded, verbose=0).flatten()
 
             scores = []
             for idx, pep in enumerate(island):
@@ -2588,7 +2589,8 @@ def run_simulation():
 
         print(f"📊 Std Dev Fitness: {std_fitness:.4f}")
 
-        avg_sim, min_sim, max_sim = similarity_stats(population)
+        _sim_sample = random.sample(population, min(100, len(population)))
+        avg_sim, min_sim, max_sim = similarity_stats(_sim_sample)
         gen_time = datetime.now() - gen_start
 
         # Goal mode for primary agent
@@ -2662,7 +2664,11 @@ def run_simulation():
         print(f"🌱 Generation {gen}")
         print(f"{'-'*60}")
         print(f"📈 Avg Fitness: {avg_fitness:.4f} | Best: {max_fitness:.4f}")
-        print(f"⏱️ Runtime: {gen_time.total_seconds():.2f}s")
+        elapsed_s = gen_time.total_seconds()
+        projected_remaining = elapsed_s * (generations - gen)
+        proj_h = int(projected_remaining // 3600)
+        proj_m = int((projected_remaining % 3600) // 60)
+        print(f"⏱️ Gen time: {elapsed_s:.1f}s | Projected remaining: {proj_h}h {proj_m}m ({generations - gen} gens left)")
 
         print("\\n🏅 Top Peptides:")
         top_peptides = generation_df.sort_values('Fitness_Score', ascending=False).head(3)
