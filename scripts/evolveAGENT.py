@@ -72,7 +72,7 @@ _CROWDING_PENALTY_START = 50
 _CROWDING_PENALTY_MAX   = 0.92
 
 _REASON_LOG_PATH = None
-
+_stagnant_gens_global = 0  # mirrors stagnant_generations for use in cognitive_mutate
 stability_model_global = None
 world_model = None
 naturalness_model = None 
@@ -1425,6 +1425,10 @@ def prophet_guided_mutation(parent: str, agent) -> Optional[str]:
 
     pos_probs = pos_probs[0]   # (50,)
     aa_probs  = aa_probs[0]    # (20,)
+    # Temperature > 1 flattens distribution = more exploratory mutations
+    temperature = 1.5
+    pos_probs = pos_probs ** (1.0 / temperature)
+    aa_probs  = aa_probs  ** (1.0 / temperature)
 
     # Choose indices with chaotic sampling
     pos_idx = _chaotic_choice_from_probs(pos_probs, agent)
@@ -1986,7 +1990,10 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
     length = len(parent)
 
     # 1) Prophet-guided candidate (if we have a model)
-    if prophet_model is not None:
+    # Reduce prophet influence when stagnant — it's replaying known solutions
+    global stagnant_generations
+    prophet_prob = max(0.3, 1.0 - _stagnant_gens_global / 400.0)
+    if prophet_model is not None and random.random() < prophet_prob:
         child = prophet_guided_mutation(parent, agent)
         if child is not None and child not in seen:
             candidates.append(("prophet", child)) 
@@ -2058,9 +2065,13 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
         scored.append((score, source, cand, features))
 
     scored.sort(reverse=True, key=lambda x: x[0])
+    # Force chaos to win 25% of the time to prevent prophet overfitting
+    if scored[0][1] == "prophet" and random.random() < 0.25:
+        chaos_candidates = [(s, src, c, f) for s, src, c, f in scored if src == "chaos"]
+        if chaos_candidates:
+            best_score, best_source, best_cand, best_reasons = chaos_candidates[0]
+            return best_cand, best_reasons, best_source, scored
     best_score, best_source, best_cand, best_reasons = scored[0]
-
-
     return best_cand, best_reasons, best_source, scored
 
 def pareto_dominates_4obj(a, b, keys):
@@ -2702,12 +2713,15 @@ def run_simulation():
         if stagnant_generations % 100 == 0 and stagnant_generations > 0:
             print(f"⚠️  {stagnant_generations} stagnant generations")
 
+        global _stagnant_gens_global
         if top5_mean > best_fitness_so_far + 0.005 or avg_fitness > best_avg_so_far + 0.002:
             best_fitness_so_far = max(best_fitness_so_far, top5_mean)
             best_avg_so_far = max(best_avg_so_far, avg_fitness)
             stagnant_generations = 0
+            _stagnant_gens_global = 0
         else:
             stagnant_generations += 1
+            _stagnant_gens_global = stagnant_generations
 
         if USE_AGENT:
             for isl_agent in (agents if (USE_ISLANDS and agents) else [agent]):
