@@ -1865,7 +1865,6 @@ def _estimate_deltas_batch(
 
     realism = np.array([realism_penalty_score(c) for c in candidates], dtype=float)
 
-    global world_model
     if world_model is not None:
         pwm = world_model.predict(X, verbose=0)  # (N,4)
         # compare to [amp,tox,stab,realism]
@@ -2813,7 +2812,6 @@ def run_simulation():
                     f2 = isl_df[isl_df['Peptide'] == p2]['Fitness_Score'].values
                     if f1.size > 0 and f2.size > 0:
                         # Use world model for fast fitness estimate if available and trained
-                        global world_model
                         if world_model is not None and len(pwm_buffer) >= PWM_BATCH_SIZE * 4:
                             enc = np.array([encode_int(child, max_len=max_len)], dtype='int32')
                             pwm_pred = world_model.predict(enc, verbose=0)[0]
