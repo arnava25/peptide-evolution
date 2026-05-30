@@ -11,7 +11,7 @@ os.makedirs("models", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
 # === Load AMP dataset ===
-df = pd.read_csv('data/model_trainers/amp_dataset_v3.csv')
+df = pd.read_csv('data/model_trainers/amp_dataset_v4.csv')
 
 assert 'Sequence' in df.columns and 'Label' in df.columns, "CSV must have 'Sequence' and 'Label' columns."
 
@@ -68,7 +68,7 @@ csv_logger = callbacks.CSVLogger('logs/amp_training_log.csv', append=False)
 # === Train ===
 history = model.fit(
     X_train, y_train,
-    epochs=35,
+    epochs=50,
     batch_size=64,
     validation_data=(X_val, y_val),
     class_weight=class_weight,
@@ -78,5 +78,39 @@ history = model.fit(
 # === Save architecture ===
 with open("models/amp_model_summary.txt", "w") as f:
     model.summary(print_fn=lambda x: f.write(x + '\n'))
+
+# === Verify ===
+
+test_seqs = [
+    ('GINGLTVRIRRAKFKHLLKKLKNSVKKRVFNFF', 'known AMP'),
+    ('KWKLFKKIEKVGQNIRDGIIKAGPAVG', 'magainin analog'),
+    ('AAAAAAAAAAAAAAAAAAAAAAAAA', 'poly-A junk'),
+    ('LLLLLLLLLLLLLLLLLLLLLLLLL', 'poly-L junk'),
+    ('ACDEFGHIKLMNPQRSTVWYACDEF', 'alphabetical'),
+    ('KKKKKKKKKKKKKKKKKKKKKKKKKK', 'poly-K'),
+    ('SARNWRNVGGKHS', 'prev false positive'),
+]
+
+best_model = tf.keras.models.load_model('models/amp_model.keras', compile=False)
+
+from sklearn.metrics import confusion_matrix, classification_report
+y_pred = (best_model.predict(X_val, verbose=0) > 0.5).astype(int).flatten()
+print("\n📊 Validation Performance:")
+print(classification_report(y_val, y_pred, target_names=['Non-AMP', 'AMP']))
+print("Confusion Matrix:")
+print(confusion_matrix(y_val, y_pred))
+
+print("\n🔬 Verification:")
+
+for seq, label in test_seqs:
+    x = np.array([encode_sequence(seq)])
+    score = float(best_model.predict(x, verbose=0)[0][0])
+    print(f"  {seq[:30]:30s} ({label}): {score:.3f}")
+
+with open("models/amp_model_training_info.txt", "w") as f:
+    f.write(f"Dataset: amp_dataset_v4.csv\n")
+    f.write(f"Sequences: {len(df)}\n")
+    f.write(f"Trained: {pd.Timestamp.now()}\n")
+    f.write(f"Val loss: {min(history.history['val_loss']):.4f}\n")
 
 print("✅ AMP model upgraded and saved!")

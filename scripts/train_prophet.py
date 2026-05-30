@@ -76,8 +76,14 @@ def load_reasoning_data():
     elif "Total_Score" not in df.columns:
         raise ValueError("Reasoning log has neither 'Reason_Score' nor 'Total_Score' column.")
 
+
     # Basic cleaning
     df = df.dropna(subset=["Parent", "Child", "Total_Score"])
+    # Filter to 25mer sequences only
+    df = df[df['Parent'].str.len() == 25].copy()
+    df = df[df['Child'].str.len() == 25].copy()
+    print(f"   After 25mer filter: {len(df)}")
+
     df["Total_Score"] = pd.to_numeric(df["Total_Score"], errors="coerce")
     df = df.dropna(subset=["Total_Score"])
     print(f"   Total rows loaded: {len(df)}")
@@ -89,8 +95,8 @@ def load_reasoning_data():
     # === CONSENSUS FILTER ===
     # Only learn from moves where BOTH AMP and Safety scores are above threshold.
     # This prevents Prophet from learning to game one metric at the expense of another.
-    AMP_THRESHOLD    = 0.55
-    SAFETY_THRESHOLD = 0.55
+    AMP_THRESHOLD    = 0.70
+    SAFETY_THRESHOLD = 0.65
 
     if "Cand_AMP" in successes.columns and "Cand_Safety" in successes.columns:
         successes["Cand_AMP"]    = pd.to_numeric(successes["Cand_AMP"],    errors="coerce")
@@ -225,6 +231,10 @@ if __name__ == "__main__":
               "Did the last run log reasons correctly?")
         raise SystemExit(0)
 
+    print(f"📊 Dataset stats:")
+    print(f"   Unique parent sequences: {len(set([str(s.tolist()) for s in X]))}")
+    print(f"   Position distribution (top 5): {dict(sorted(zip(*np.unique(y_pos.argmax(axis=1), return_counts=True)), key=lambda x: -x[1])[:5])}")
+    print(f"   AA distribution (top 5): {dict(sorted(zip(*np.unique(y_aa.argmax(axis=1), return_counts=True)), key=lambda x: -x[1])[:5])}")
     print("🔮 Training The Prophet (stronger version)...")
 
     model = build_prophet()
@@ -233,10 +243,17 @@ if __name__ == "__main__":
     callbacks = [
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=3,
+            patience=8,
             restore_best_weights=True,
             verbose=1,
-        )
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=3,
+            verbose=1,
+            min_lr=1e-6,
+        ),
     ]
 
     history = model.fit(
