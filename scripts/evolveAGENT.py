@@ -1851,9 +1851,17 @@ def _estimate_deltas_batch(
     """
     X = np.array([encode_int(c, max_len=max_len) for c in candidates], dtype="int32")
 
-    amp = amp_model.predict(X, verbose=0).reshape(-1)
-    tox = tox_model.predict(X, verbose=0).reshape(-1)
-    stab = np.zeros(len(candidates), dtype=float)  # placeholder — stability is heuristic now
+    # Use world model for fast scoring if trained, fall back to real CNNs
+    global world_model
+    if world_model is not None and len(pwm_buffer) >= PWM_BATCH_SIZE * 8:
+        pwm_preds = world_model.predict(X, verbose=0)
+        amp  = np.clip(pwm_preds[:, 0], 0.0, 1.0)
+        tox  = np.clip(pwm_preds[:, 1], 0.0, 1.0)
+        stab = np.clip(pwm_preds[:, 2], 0.0, 1.0)
+    else:
+        amp = amp_model.predict(X, verbose=0).reshape(-1)
+        tox = tox_model.predict(X, verbose=0).reshape(-1)
+        stab = np.zeros(len(candidates), dtype=float)
 
     realism = np.array([realism_penalty_score(c) for c in candidates], dtype=float)
 
@@ -2664,11 +2672,6 @@ def run_simulation():
         print(f"🌱 Generation {gen}")
         print(f"{'-'*60}")
         print(f"📈 Avg Fitness: {avg_fitness:.4f} | Best: {max_fitness:.4f}")
-        elapsed_s = gen_time.total_seconds()
-        projected_remaining = elapsed_s * (generations - gen)
-        proj_h = int(projected_remaining // 3600)
-        proj_m = int((projected_remaining % 3600) // 60)
-        print(f"⏱️ Gen time: {elapsed_s:.1f}s | Projected remaining: {proj_h}h {proj_m}m ({generations - gen} gens left)")
 
         print("\\n🏅 Top Peptides:")
         top_peptides = generation_df.sort_values('Fitness_Score', ascending=False).head(3)
@@ -2737,6 +2740,7 @@ def run_simulation():
         generation_df.to_csv(THIS_RUN_FILE, mode='a',
                              header=not os.path.exists(THIS_RUN_FILE), index=False)
 
+        repro_start = datetime.now()
         # ── Per-island reproduction ─────────────────────────────────────
         new_islands = []
         for isl_idx, (island, isl_df) in enumerate(zip(islands, island_dfs)):
@@ -2803,18 +2807,27 @@ def run_simulation():
                         p1, p2 = random.choices(survivors, weights=weights, k=2)
 
                     child = crossover(p1, p2)
-                    enc   = np.array([encode_int(child, max_len=max_len)])
-                    amp_c = float(amp_model.predict(enc, verbose=0)[0][0])
-                    tox_c = float(toxicity_model.predict(enc, verbose=0)[0][0])
-                    stab_c = 0.0  # placeholder — heuristic used inside score_peptide
-                    cf    = score_peptide(child, amp_c, tox_c, stab_c,
-                                          agent=isl_agent if USE_AGENT else None)[3]
-
+                    if not is_realistic(child, gen) or not novelty_floor_check(child, archive_kmers):
+                        continue
                     f1 = isl_df[isl_df['Peptide'] == p1]['Fitness_Score'].values
                     f2 = isl_df[isl_df['Peptide'] == p2]['Fitness_Score'].values
                     if f1.size > 0 and f2.size > 0:
-                        if cf >= 0.80 * max(f1[0], f2[0]) and is_realistic(child, gen) \
-                                and novelty_floor_check(child, archive_kmers):
+                        # Use world model for fast fitness estimate if available and trained
+                        global world_model
+                        if world_model is not None and len(pwm_buffer) >= PWM_BATCH_SIZE * 4:
+                            enc = np.array([encode_int(child, max_len=max_len)], dtype='int32')
+                            pwm_pred = world_model.predict(enc, verbose=0)[0]
+                            amp_c, tox_c = float(pwm_pred[0]), float(pwm_pred[1])
+                            cf_fast = amp_c * 0.5 + (1.0 - tox_c) * 0.5  # rough proxy
+                            if cf_fast < 0.45:  # fast reject obvious failures
+                                continue
+                        enc = np.array([encode_int(child, max_len=max_len)])
+                        amp_c = float(amp_model.predict(enc, verbose=0)[0][0])
+                        tox_c = float(toxicity_model.predict(enc, verbose=0)[0][0])
+                        stab_c = 0.0
+                        cf = score_peptide(child, amp_c, tox_c, stab_c,
+                                          agent=isl_agent if USE_AGENT else None)[3]
+                        if cf >= 0.80 * max(f1[0], f2[0]):
                             new_pop.append(child)
                             with open(ACTION_LOG, 'a') as f: f.write(f"{gen},crossover\n")
                             continue
@@ -2856,6 +2869,13 @@ def run_simulation():
 
             new_islands.append(new_pop)
             print(f"✅ Island {isl_idx}: built {len(new_pop)} sequences")
+
+        repro_time = (datetime.now() - repro_start).total_seconds()
+        total_gen_time = (datetime.now() - gen_start).total_seconds()
+        proj_remaining = total_gen_time * (generations - gen)
+        proj_h = int(proj_remaining // 3600)
+        proj_m = int((proj_remaining % 3600) // 60)
+        print(f"⏱️ Gen time: {total_gen_time:.1f}s (score: {gen_time.total_seconds():.1f}s repro: {repro_time:.1f}s) | Projected: {proj_h}h {proj_m}m")
 
         # ── Agent updates (per-island) ──────────────────────────────────
         if USE_AGENT:
