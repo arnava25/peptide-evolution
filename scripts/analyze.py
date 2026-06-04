@@ -38,7 +38,7 @@ def find_latest_run_tag():
             timestamp_part = full_tag
 
 
-            for label in ("_AGENT_ON", "_AGENT_OFF", "_MAPE_13mer", "_MAPE_8mer", "_MAPE", "_PARETO"):
+            for label in ("_AGENT_ON", "_AGENT_OFF", "_MAPE_13mer", "_MAPE_25mer", "_MAPE_8mer", "_MAPE", "_PARETO"):
                 if timestamp_part.endswith(label):
                     timestamp_part = timestamp_part[: -len(label)]
                     break
@@ -173,6 +173,23 @@ def plot_fitness(summary_df, out_dir, run_tag):
     fig, ax = plt.subplots()
     ax.plot(summary_df["Generation"], summary_df["Avg_Fitness"], label="Avg Fitness")
     ax.plot(summary_df["Generation"], summary_df["Max_Fitness"], label="Max Fitness")
+
+    # Overlay peak events if available
+    peak_path = os.path.join(BASE_DATA_DIR, f"peak_events_{run_tag}.csv")
+    if os.path.exists(peak_path):
+        try:
+            peak_df = pd.read_csv(peak_path)
+            for _, row in peak_df.iterrows():
+                g = int(row["Generation"])
+                if row["EventType"] == "abandonment":
+                    ax.axvline(x=g, color='orange', linestyle='--', alpha=0.7, linewidth=1)
+                    ax.text(g, ax.get_ylim()[0], '🏔', fontsize=8, color='orange', ha='center')
+                elif row["EventType"] == "restart":
+                    ax.axvline(x=g, color='red', linestyle='--', alpha=0.7, linewidth=1)
+                    ax.text(g, ax.get_ylim()[0], '🔄', fontsize=8, color='red', ha='center')
+        except Exception:
+            pass
+
     ax.set_xlabel("Generation")
     ax.set_ylabel("Fitness")
     ax.set_title(f"Fitness over Generations (run {run_tag})")
@@ -183,7 +200,6 @@ def plot_fitness(summary_df, out_dir, run_tag):
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
     print(f"📈 Saved {out_path}")
-
 
 def plot_traits(traits_df, out_dir, run_tag):
     if traits_df is None or traits_df.empty:

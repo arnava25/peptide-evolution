@@ -39,27 +39,22 @@ def encode_seq(seq: str) -> np.ndarray:
 
 def load_reasoning_data():
     """
-    Load ALL agent_reasoning CSVs and extract:
-        X      : one-hot parent sequence
-        y_pos  : one-hot mutated position
-        y_aa   : one-hot mutated amino acid
-        w      : sample weights based on Reason_Score
-
-    Only uses:
-        - rows with Reason_Score > 0  (the agent judged this mutation as beneficial)
-        - rows passing a CONSENSUS filter: Cand_AMP > 0.55 AND Cand_Safety > 0.55
-          so Prophet learns only from moves that both internal models agreed were good
-        - single point mutations (no indels)
-
-    NOTE: Column is Reason_Score (not Total_Score — that was a legacy bug).
-    Uses ALL available run logs, not just the latest, to maximise training data.
+    Load agent_reasoning data with contrastive training:
+    - Accepted mutations: learn TO mutate this position/AA (positive weight)
+    - Rejected mutations: learn to AVOID this position/AA (negative weight via label smoothing)
+    Uses combined 25mer reasoning log.
     """
-    # Collect ALL reasoning logs across all runs
-    list_of_files = glob.glob("data/agent_reasoning_*.csv")
+    candidate_files = [
+        "data/agent_reasoning_25mer_combined.csv",
+    ]
+    # fallback to any reasoning log in data/
+    list_of_files = [f for f in candidate_files if os.path.exists(f)]
     if not list_of_files:
-        raise FileNotFoundError("No agent_reasoning logs found in data/")
+        list_of_files = glob.glob("data/agent_reasoning_*.csv")
+    if not list_of_files:
+        raise FileNotFoundError("No agent_reasoning logs found.")
 
-    print(f"📖 Found {len(list_of_files)} reasoning log(s). Loading all...")
+    print(f"📖 Loading: {list_of_files}")
     dfs = []
     for f in list_of_files:
         try:
@@ -70,109 +65,104 @@ def load_reasoning_data():
         raise RuntimeError("Could not load any reasoning log.")
     df = pd.concat(dfs, ignore_index=True)
 
-    # Normalise column name: support both legacy Total_Score and current Reason_Score
+    # Normalise score column name
     if "Reason_Score" in df.columns:
         df = df.rename(columns={"Reason_Score": "Total_Score"})
     elif "Total_Score" not in df.columns:
-        raise ValueError("Reasoning log has neither 'Reason_Score' nor 'Total_Score' column.")
+        raise ValueError("No Reason_Score or Total_Score column found.")
 
-
-    # Basic cleaning
     df = df.dropna(subset=["Parent", "Child", "Total_Score"])
-    # Filter to 25mer sequences only
     df = df[df['Parent'].str.len() == 25].copy()
     df = df[df['Child'].str.len() == 25].copy()
     print(f"   After 25mer filter: {len(df)}")
 
     df["Total_Score"] = pd.to_numeric(df["Total_Score"], errors="coerce")
     df = df.dropna(subset=["Total_Score"])
-    print(f"   Total rows loaded: {len(df)}")
 
-    # Keep only "good" moves: positive agent score
-    successes = df[df["Total_Score"] > 0.0].copy()
-    print(f"✅ Positive-score mutations: {len(successes)} / {len(df)}")
+    # Tag accepted vs rejected
+    df["is_rejected"] = df["Source"].str.contains("rejected", na=False)
+    accepted = df[~df["is_rejected"]].copy()
+    rejected = df[df["is_rejected"]].copy()
+    print(f"✅ Accepted: {len(accepted)} | ❌ Rejected: {len(rejected)}")
 
-    # === CONSENSUS FILTER ===
-    # Only learn from moves where BOTH AMP and Safety scores are above threshold.
-    # This prevents Prophet from learning to game one metric at the expense of another.
+    # Consensus filter on accepted only
     AMP_THRESHOLD    = 0.70
     SAFETY_THRESHOLD = 0.65
-
-    if "Cand_AMP" in successes.columns and "Cand_Safety" in successes.columns:
-        successes["Cand_AMP"]    = pd.to_numeric(successes["Cand_AMP"],    errors="coerce")
-        successes["Cand_Safety"] = pd.to_numeric(successes["Cand_Safety"], errors="coerce")
-        before = len(successes)
-        successes = successes[
-            (successes["Cand_AMP"]    >= AMP_THRESHOLD) &
-            (successes["Cand_Safety"] >= SAFETY_THRESHOLD)
+    if "Cand_AMP" in accepted.columns and "Cand_Safety" in accepted.columns:
+        accepted["Cand_AMP"]    = pd.to_numeric(accepted["Cand_AMP"],    errors="coerce")
+        accepted["Cand_Safety"] = pd.to_numeric(accepted["Cand_Safety"], errors="coerce")
+        before = len(accepted)
+        accepted = accepted[
+            (accepted["Cand_AMP"]    >= AMP_THRESHOLD) &
+            (accepted["Cand_Safety"] >= SAFETY_THRESHOLD)
         ].copy()
-        print(f"🔍 Consensus filter (AMP≥{AMP_THRESHOLD}, Safety≥{SAFETY_THRESHOLD}): "
-              f"{len(successes)} / {before} passed")
-    else:
-        print("⚠️  Cand_AMP / Cand_Safety columns not found — skipping consensus filter.")
+        print(f"🔍 Consensus filter: {len(accepted)} / {before} accepted passed")
 
-    X = []
-    y_pos = []
-    y_aa = []
-    weights = []
+    # Downsample rejected to 2x accepted to keep balance
+    n_rej = min(len(rejected), len(accepted) * 2)
+    rejected = rejected.sample(n=n_rej, random_state=42).copy()
+    print(f"⚖️  Using {len(accepted)} accepted + {len(rejected)} rejected")
 
-    for _, row in successes.iterrows():
-        parent = str(row["Parent"])
-        child = str(row["Child"])
+    X, y_pos, y_aa, weights = [], [], [], []
 
-        # Skip indels (only allow same-length sequences)
-        if len(parent) != len(child):
-            continue
-
-        # Identify positions where parent and child differ
+    for _, row in accepted.iterrows():
+        parent, child = str(row["Parent"]), str(row["Child"])
+        if len(parent) != len(child): continue
         diffs = [i for i in range(len(parent)) if parent[i] != child[i]]
-        if len(diffs) != 1:
-            # Only learn from single point mutations for now
-            continue
-
+        if len(diffs) != 1: continue
         idx = diffs[0]
-        if idx >= MAX_LEN:
-            # Out-of-range for our fixed model length
-            continue
-
+        if idx >= MAX_LEN: continue
         new_aa = child[idx]
-        if new_aa not in aa_to_idx:
-            continue
+        if new_aa not in aa_to_idx: continue
 
-        # Encode parent
         X.append(encode_seq(parent))
-
-        # Target 1: position
         pos_vec = np.zeros(MAX_LEN, dtype="float32")
         pos_vec[idx] = 1.0
         y_pos.append(pos_vec)
-
-        # Target 2: amino acid
         aa_vec = np.zeros(len(AMINO_ACIDS), dtype="float32")
         aa_vec[aa_to_idx[new_aa]] = 1.0
         y_aa.append(aa_vec)
+        weights.append(max(float(row["Total_Score"]), 0.01))
 
-        # Sample weight: how good was this move?
-        weights.append(float(row["Total_Score"]))
+    for _, row in rejected.iterrows():
+        parent, child = str(row["Parent"]), str(row["Child"])
+        if len(parent) != len(child): continue
+        diffs = [i for i in range(len(parent)) if parent[i] != child[i]]
+        if len(diffs) != 1: continue
+        idx = diffs[0]
+        if idx >= MAX_LEN: continue
+        new_aa = child[idx]
+        if new_aa not in aa_to_idx: continue
 
+        X.append(encode_seq(parent))
+        # For rejected: teach prophet to mutate a DIFFERENT position
+        # Use a uniform distribution with the rejected position suppressed
+        pos_vec = np.ones(MAX_LEN, dtype="float32")
+        pos_vec[idx] = 0.0  # zero out rejected position
+        pos_vec /= pos_vec.sum()
+        y_pos.append(pos_vec)
+        # Uniform over AAs except the rejected one
+        aa_vec = np.ones(len(AMINO_ACIDS), dtype="float32")
+        aa_vec[aa_to_idx[new_aa]] = 0.0
+        aa_vec /= aa_vec.sum()
+        y_aa.append(aa_vec)
+        weights.append(0.3)  # small positive weight, not negative
+    
     if not X:
-        print("❌ No usable single-point successful mutations found.")
+        print("❌ No usable training samples found.")
         return None, None, None, None
 
-    X = np.array(X, dtype="float32")
-    y_pos = np.array(y_pos, dtype="float32")
-    y_aa = np.array(y_aa, dtype="float32")
+    X       = np.array(X,       dtype="float32")
+    y_pos   = np.array(y_pos,   dtype="float32")
+    y_aa    = np.array(y_aa,    dtype="float32")
     weights = np.array(weights, dtype="float32")
 
-    # Normalize / clip weights so training is stable
-    # - clip extreme outliers
-    # - rescale so mean weight ≈ 1.0
+    # Clip and normalize — keep sign for contrastive signal
     weights = np.clip(weights, 1e-4, np.percentile(weights, 95))
     weights /= np.mean(weights)
 
     print(f"📊 Final dataset: {len(X)} samples")
-    print(f"   Mean weight: {weights.mean():.3f} | "
-          f"Min weight: {weights.min():.3f} | Max weight: {weights.max():.3f}")
+    print(f"   Mean weight: {weights.mean():.3f} | Min: {weights.min():.3f} | Max: {weights.max():.3f}")
 
     return X, y_pos, y_aa, weights
 
