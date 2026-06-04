@@ -1077,7 +1077,7 @@ def historical_peak_penalty(peptide: str) -> float:
         inter = len(S & peak_kmers)
         union = len(S | peak_kmers)
         sim = inter / union if union else 0.0
-        if sim <= 0.35:
+        if sim <= 0.25:
             continue
 
         # Decay penalty based on peak age
@@ -1087,7 +1087,7 @@ def historical_peak_penalty(peptide: str) -> float:
         else:
             decay = 1.0  # no age info, full penalty
 
-        if sim > 0.55:
+        if sim > 0.40:
             penalty = 0.5 + 0.5 * (1.0 - decay)  # decays from 0.5 → 1.0
         else:
             penalty = 0.75 + 0.25 * (1.0 - decay)  # decays from 0.75 → 1.0
@@ -1918,7 +1918,7 @@ def _estimate_deltas_batch(
 
     # Use world model for fast scoring if trained, fall back to real CNNs
     global world_model
-    if world_model is not None and len(pwm_buffer) >= PWM_BATCH_SIZE * 8:
+    if world_model is not None and len(pwm_buffer) >= PWM_BATCH_SIZE * 40:    
         pwm_preds = world_model.predict(X, verbose=0)
         amp  = np.clip(pwm_preds[:, 0], 0.0, 1.0)
         tox  = np.clip(pwm_preds[:, 1], 0.0, 1.0)
@@ -2135,8 +2135,9 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
             best_score, best_source, best_cand, best_reasons = chaos_candidates[0]
             return best_cand, best_reasons, best_source, scored
 
-    # Force chaos to win 35% of the time to prevent prophet/dreamer overfitting
-    if scored[0][1] in ("prophet", "dreamer") and random.random() < 0.35:
+    # Force chaos to win more often — dreamer dominates early before world model is calibrated
+    _chaos_override = 0.50 if scored[0][1] == "dreamer" else 0.35
+    if scored[0][1] in ("prophet", "dreamer") and random.random() < _chaos_override:
         chaos_candidates = [(s, src, c, f) for s, src, c, f in scored if src == "chaos"]
         if chaos_candidates:
             best_score, best_source, best_cand, best_reasons = chaos_candidates[0]
@@ -2880,9 +2881,31 @@ def run_simulation():
 
             # Collect top 10% of archive as seeds
             all_archive = [e for front in map_elites_grid.values() for e in front]
-            all_archive.sort(key=lambda e: e["fitness"], reverse=True)
+
+            # Pick elites that span diverse MAP-Elites cells, not just top fitness
+            # This prevents restart seeding the same biochemical neighborhood
             n_keep = max(10, int(population_size * 0.10))
-            elite_seqs = [e["peptide"] for e in all_archive[:n_keep]]
+            all_keys = list(map_elites_grid.keys())
+            random.shuffle(all_keys)
+            elite_seqs = []
+            seen_cells = set()
+            # First pass: one best sequence per cell, prioritize underrepresented cells
+            for k in all_keys:
+                if k not in seen_cells:
+                    front = sorted(map_elites_grid[k], key=lambda e: e["fitness"], reverse=True)
+                    elite_seqs.append(front[0]["peptide"])
+                    seen_cells.add(k)
+                if len(elite_seqs) >= n_keep:
+                    break
+            # If not enough, fill with top fitness from remaining
+            if len(elite_seqs) < n_keep:
+                all_archive.sort(key=lambda e: e["fitness"], reverse=True)
+                for e in all_archive:
+                    if e["peptide"] not in elite_seqs:
+                        elite_seqs.append(e["peptide"])
+                    if len(elite_seqs) >= n_keep:
+                        break
+
             print(f"   Keeping {len(elite_seqs)} elite sequences from archive.")
 
             # Save peak to historical peaks list for long-term novelty
@@ -2906,7 +2929,12 @@ def run_simulation():
                 if random.random() < 0.5 or not elite_seqs:
                     seq = ''.join(random.choices(amino_acids, k=peptide_length))
                 else:
-                    seq = smart_mutate(random.choice(elite_seqs), 0.6)
+                    # Wild mutate to escape biochemical neighborhood, not just sequence space
+                    base = list(random.choice(elite_seqs))
+                    for i in range(len(base)):
+                        if random.random() < 0.6:
+                            base[i] = random.choice(amino_acids)  # fully random, not group-conservative
+                    seq = ''.join(base)
                 if is_realistic(seq, gen):
                     new_randoms.append(seq)
 
