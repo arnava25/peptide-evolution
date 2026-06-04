@@ -50,7 +50,7 @@ def _max_run_len(seq: str, charset: set) -> int:
     return best
 
 ARCHIVE_K = 3
-ARCHIVE_MAX = 20000
+ARCHIVE_MAX = 2000
 ARCHIVE_SAMPLE_N = 400
 
 
@@ -394,7 +394,7 @@ USE_AGENT = True          # True = agent ON (cognitive evolution)
 # Settings
 amino_acids = list('ACDEFGHIKLMNPQRSTVWY')
 population_size = 400
-generations = 10
+generations = 2000
 peptide_length = 25
 max_len = 50
 
@@ -2561,42 +2561,6 @@ def run_simulation():
         print(f"🔄 Archive prepopulated: {len(archive_kmers)} entries")
 
     else:
-        def load_apd_seeds(fasta_path, peptide_length=25, n=None):
-            seeds = []
-            with open(fasta_path) as f:
-                seq = ""
-                for line in f:
-                    line = line.strip()
-                    if line.startswith(">"):
-                        if seq and len(seq) >= 10:
-                            seeds.append(seq)
-                        seq = ""
-                    else:
-                        seq += line
-                if seq and len(seq) >= 10:
-                    seeds.append(seq)
-            valid = set('ACDEFGHIKLMNPQRSTVWY')
-            seeds = [s for s in seeds if all(c in valid for c in s)]
-            processed = []
-            for s in seeds:
-                if len(s) >= peptide_length:
-                    processed.append(s[:peptide_length])
-                else:
-                    pad = ''.join(random.choices(amino_acids, k=peptide_length - len(s)))
-                    processed.append(s + pad)
-            random.shuffle(processed)
-            if n:
-                processed = processed[:n]
-            return processed
-
-        apd_available = os.path.exists('data/apd_sequences.fasta')
-
-        print("\n🧬 Population initialization:")
-        print("  1. APD-seeded (natural AMP scaffolds)" + (" [available]" if apd_available else " [APD file not found]"))
-        print("  2. Random (fully random sequences)")
-        if apd_available:
-            print("  3. Partial (50% APD + 50% random)")
-
 
         population = [''.join(random.choices(amino_acids, k=peptide_length)) for _ in range(population_size)]
         print(f"🌱 Random population: {population_size} sequences.")
