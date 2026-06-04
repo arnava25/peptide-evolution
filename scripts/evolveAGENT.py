@@ -1903,32 +1903,6 @@ def novelty_vs_archive(seq: str, archive_kmers: list[set], k: int = 3, sample_n:
     return float(1.0 - best_sim)
 
 
-def novelty_vs_apd(seq: str, apd_kmers: list[set], k: int = 3) -> float:
-    """
-    Returns novelty in [0,1] as 1 - max_jaccard_sim to APD sequences.
-    High = genuinely novel vs known natural AMPs.
-    Low = similar to a known natural AMP.
-    """
-    if not apd_kmers:
-        return 0.5
-    S = kmer_set(seq, k)
-    if not S:
-        return 0.5
-    best_sim = 0.0
-    # sample 200 APD sequences for speed
-    sample = random.sample(apd_kmers, min(200, len(apd_kmers)))
-    for T in sample:
-        if not T:
-            continue
-        inter = len(S & T)
-        union = len(S | T)
-        sim = inter / union if union else 0.0
-        if sim > best_sim:
-            best_sim = sim
-            if best_sim >= 0.98:
-                break
-    return float(1.0 - best_sim)
-
 def _estimate_deltas_batch(
     candidates: list[str],
     amp_model, tox_model, stab_model,
@@ -2396,27 +2370,6 @@ def run_simulation():
         mic_model = None
         print(f"⚠️ MIC model not found ({e}). Running without MIC objective.")
 
-
-    # Precompute APD kmer sets for novelty-vs-APD objective
-    apd_kmers = []
-    apd_path = 'data/apd_sequences.fasta'
-    if os.path.exists(apd_path):
-        _valid = set('ACDEFGHIKLMNPQRSTVWY')
-        _seq = ""
-        with open(apd_path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if _line.startswith(">"):
-                    if _seq and all(c in _valid for c in _seq):
-                        apd_kmers.append(kmer_set(_seq, ARCHIVE_K))
-                    _seq = ""
-                else:
-                    _seq += _line
-            if _seq and all(c in _valid for c in _seq):
-                apd_kmers.append(kmer_set(_seq, ARCHIVE_K))
-        print(f"🧬 APD novelty reference loaded: {len(apd_kmers)} sequences")
-    else:
-        print("⚠️ APD FASTA not found, novelty-vs-APD disabled")
 
     # 🔮 Prophet mutation model (learned from past runs)
     if USE_AGENT:
