@@ -2868,14 +2868,16 @@ def run_simulation():
 
 
 
-        # Reset abandonment flag after restart so it can fire again on new peak
+        # Reset _last_peak_fitness when stagnation counter resets
         if stagnant_generations == 0:
             run_simulation._abandonment_fired = False
+            run_simulation._last_peak_fitness = None  # will be re-initialized next stagnation
 
         # Early stop check
         # ── True restart at 400 stagnant gens ──────────────────────────
         RESTART_TRIGGER = 400
-        if stagnant_generations == RESTART_TRIGGER:
+        if stagnant_generations >= RESTART_TRIGGER:
+
             print(f"\n🔄 TRUE RESTART at gen {gen} — {stagnant_generations} stagnant gens.")
 
             # Collect top 10% of archive as seeds
@@ -2950,6 +2952,13 @@ def run_simulation():
             stagnant_generations = 0
             _stagnant_gens_global = 0
             run_simulation._restart_gen = gen
+
+            # Reset stagnation counters and decay clock
+            stagnant_generations = 0
+            _stagnant_gens_global = 0
+            run_simulation._restart_gen = gen
+            run_simulation._last_peak_fitness = None
+            
             # Aggressively decay salient motifs so old peak bias is cleared
             global salient_motifs
             salient_motifs = {k: v * 0.1 for k, v in salient_motifs.items() if v * 0.1 > 0.001}
