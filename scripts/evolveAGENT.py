@@ -2546,7 +2546,7 @@ def run_simulation():
     map_elites_grid = {}
     for gen in range(1, generations + 1):
         gen_start = datetime.now()
-        print(f"\\n🌱 Generation {gen}...")
+        print(f"\n🌱 Generation {gen}...")
 
         # ── Per-gen agent rotation ──────────────────────────────────────
         if USE_ISLANDS and agents is not None:
@@ -2742,7 +2742,7 @@ def run_simulation():
         
         mutation_rate = float(np.clip(mutation_rate, 0.10, 0.65))
 
-        print(f"\\n{'-'*60}")
+        print(f"\n{'-'*60}")
         print(f"🌱 Generation {gen}")
         print(f"{'-'*60}")
         print(f"📈 Avg Fitness: {avg_fitness:.4f} | Best: {max_fitness:.4f}")
