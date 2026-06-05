@@ -2123,9 +2123,10 @@ def cognitive_mutate(parent: str, mutation_rate: float, agent: AgentController,
 
     scored.sort(reverse=True, key=lambda x: x[0])
 
-    # Disable prophet/dreamer entirely if population is converging
-    # — they replay known solutions and accelerate convergence
-    converging = _stagnant_gens_global > 200
+    # Gradually reduce prophet/dreamer influence as stagnation deepens
+    # At 0 stagnant: full prophet/dreamer, at 400 stagnant: 20% chance only
+    _guided_prob = max(0.20, 1.0 - _stagnant_gens_global / 400.0)
+    converging = (random.random() > _guided_prob)
     if converging:
         chaos_candidates = [(s, src, c, f) for s, src, c, f in scored if src == "chaos"]
         if chaos_candidates:
