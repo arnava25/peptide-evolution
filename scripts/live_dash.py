@@ -481,15 +481,36 @@ def build_figure(files, window=0):
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
+    # detect current gen count dynamically
+    files = find_files()
+    total_gens = 0
+    if files["fitness"]:
+        try:
+            df = pd.read_csv(files["fitness"])
+            total_gens = int(df["Generation"].max())
+        except Exception:
+            pass
+
     print("\nevolveAGENT Live Dashboard")
     print("──────────────────────────")
     print("Time window:")
-    print("  1. All generations")
-    print("  2. Last 50 gens")
-    print("  3. Last 100 gens")
-    print("  4. Last 200 gens")
+    if total_gens > 0:
+        w5  = max(10, total_gens // 20)
+        w10 = max(20, total_gens // 10)
+        w25 = max(50, total_gens // 4)
+        window_map = {"1": 0, "2": w5, "3": w10, "4": w25}
+        print(f"  1. All {total_gens} generations")
+        print(f"  2. Last {w5} gens  (5%)")
+        print(f"  3. Last {w10} gens (10%)")
+        print(f"  4. Last {w25} gens (25%)")
+    else:
+        window_map = {"1": 0, "2": 50, "3": 100, "4": 200}
+        print("  1. All generations")
+        print("  2. Last 50 gens")
+        print("  3. Last 100 gens")
+        print("  4. Last 200 gens")
+
     choice = input("\nSelect [1-4] (default 1): ").strip() or "1"
-    window_map = {"1": 0, "2": 50, "3": 100, "4": 200}
     window = window_map.get(choice, 0)
     print()
 
@@ -510,4 +531,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
