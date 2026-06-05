@@ -497,7 +497,6 @@ def score_peptide(
     previous_peptides=None,
     agent=None,
     archive_kmers=None,   # FIXED name
-    pyamp=None,
 ):
     # --- Biophysics / heuristics ---
     solubility_score = estimate_solubility(peptide)
@@ -862,9 +861,7 @@ def append_generation_to_master(generation_number, generation_data):
         'Solubility_Score', 'Aggregation_Risk', 'Isoelectric_Point',
         'Boman_Index', 'Net_Charge', 'Hydrophobicity',
         'Solubility_Tag', 'Aggregation_Tag',
-        'Fitness_Score', 'Realism_Score', 'Quality_Tag',
-        'PyAMPA_AMP', 'PyAMPA_Toxicity', 'PyAMPA_Hemolysis', 'PyAMPA_CPP',
-        'Surprise_AMP', 'Surprise_Toxicity',        
+        'Fitness_Score', 'Realism_Score', 'Quality_Tag',        
         'Hydrophobic_Moment',
         'MIC_Score',
     ]
@@ -2613,7 +2610,6 @@ def run_simulation():
                     pep, amp_v, tox_v, stab_v, sol, agg, pI, boman,
                     net_charge, hydrophobicity, sol_tag, agg_tag,
                     fitness, realism_score, tag,
-                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                     hydro_moment, mic_score,
                 ))
 
@@ -2624,8 +2620,6 @@ def run_simulation():
                 'Boman_Index', 'Net_Charge', 'Hydrophobicity',
                 'Solubility_Tag', 'Aggregation_Tag',
                 'Fitness_Score', 'Realism_Score', 'Quality_Tag',
-                'PyAMPA_AMP', 'PyAMPA_Toxicity', 'PyAMPA_Hemolysis', 'PyAMPA_CPP',
-                'Surprise_AMP', 'Surprise_Toxicity',
                 'Hydrophobic_Moment', 'MIC_Score',
             ])
             isl_df['Generation'] = gen
