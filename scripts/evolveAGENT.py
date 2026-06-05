@@ -2535,6 +2535,8 @@ def run_simulation():
 
     stagnant_generations = 0
     best_fitness_so_far = 0
+    run_simulation._last_peak_fitness = 0.0
+    run_simulation._abandonment_fired = False
     best_avg_so_far = 0
     global_best_score = -np.inf
     global_best_peptide = None
@@ -2595,7 +2597,6 @@ def run_simulation():
                     previous_peptides=island,
                     agent=isl_agent if USE_AGENT else None,
                     archive_kmers=archive_kmers,
-                    pyamp=None,
                 )
 
                 amp_v, tox_v, stab_v, fitness, sol, agg, pI, boman, net_charge, hydrophobicity, sol_tag, agg_tag, realism_score, hydro_moment = result
@@ -2822,7 +2823,11 @@ def run_simulation():
         # ── Deliberate peak abandonment — adaptive trigger ──────────────
         # Trigger when improvement rate drops below threshold, not at fixed gen count
         # Minimum 100 stagnant gens before considering abandonment
-        _improvement_rate = (best_fitness_so_far - getattr(run_simulation, '_last_peak_fitness', 0.0)) / max(stagnant_generations, 1)
+        _last = getattr(run_simulation, '_last_peak_fitness', None)
+        if _last is None:
+            run_simulation._last_peak_fitness = best_fitness_so_far
+            _last = best_fitness_so_far
+        _improvement_rate = (best_fitness_so_far - _last) / max(stagnant_generations, 1)
         _abandonment_ready = (
             stagnant_generations >= 100 and
             _improvement_rate < 0.0001 and  # essentially flat
