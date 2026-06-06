@@ -101,12 +101,13 @@ def count_map_elites_cells(data_dir):
 
 
 def compute_stagnation(fitness_df, threshold=0.005):
+    if "StagnantGens" in fitness_df.columns:
+        return fitness_df["StagnantGens"].values, fitness_df["Generation"].values
+    # fallback for old runs without StagnantGens column
     if "AvgFitness" not in fitness_df.columns or "MaxFitness" not in fitness_df.columns:
         return None, None
     avg = fitness_df["AvgFitness"].values
-    mx  = fitness_df["MaxFitness"].values
-    # use Top5Mean if available (matches terminal logic exactly)
-    top5 = fitness_df["Top5Mean"].values if "Top5Mean" in fitness_df.columns else mx
+    top5 = fitness_df["Top5Mean"].values if "Top5Mean" in fitness_df.columns else fitness_df["MaxFitness"].values
     gens = fitness_df["Generation"].values
     stagnant = np.zeros(len(avg), dtype=int)
     best_avg = best_top5 = count = 0
