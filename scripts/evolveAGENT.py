@@ -1619,7 +1619,7 @@ class AgentController:
             0.18,  # safety
             0.19,  # stability
             0.09,  # realism
-            0.07,  # novelty      ← reduced: archive bonus handles this now
+            0.10,  # novelty      ← bumped from 0.07, was locking too low
             0.08,  # parsimony
             0.15,  # curiosity
         ])
