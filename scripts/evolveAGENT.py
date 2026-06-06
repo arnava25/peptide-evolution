@@ -3279,9 +3279,12 @@ def run_simulation():
         if niche_penalty_active > 0:
             niche_penalty_active -= 1
 
+
         with open(FITNESS_STATS_FILE, 'a') as f:
-            if gen == 1: f.write("Generation,AvgFitness,MaxFitness,StdFitness,Top5Mean\n")
-            f.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f},{top5_mean:.5f}\n")
+            if gen == 1: f.write("Generation,AvgFitness,MaxFitness,StdFitness,Top5Mean,StagnantGens\n")
+            f.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f},{top5_mean:.5f},{stagnant_generations}\n")
+
+            
 
         islands = new_islands
         save_population([p for isl in islands for p in isl])
