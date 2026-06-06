@@ -2512,6 +2512,24 @@ def run_simulation():
 
             run_simulation._start_gen = _start_gen
 
+            # Restore crowding penalties
+            _saved_counts = state.get('cell_visit_counts', {})
+            for k_str, v in _saved_counts.items():
+                ci, hi = map(int, k_str.split(','))
+                _cell_visit_counts[(ci, hi)] = v
+            if _saved_counts:
+                print(f"🔄 Restored {len(_cell_visit_counts)} cell visit counts.")
+
+            # Restore niche state
+            niche_penalty_active = state.get('niche_penalty_active', 0)
+            _saved_niche = state.get('niche_archive', [])
+            if _saved_niche:
+                niche_archive = [
+                    (set(s for kmer_list in kmers for s in kmer_list), fit)
+                    for kmers, fit in _saved_niche
+                ]
+                print(f"🔄 Restored {len(niche_archive)} niche entries (penalty active: {niche_penalty_active}).")
+
         else:
             print("⚠️ No run state found — starting stagnation tracking fresh.")
 
@@ -3317,8 +3335,14 @@ def run_simulation():
                 'historical_peaks': _peaks_serializable,
                 'historical_peak_ages': getattr(run_simulation, '_historical_peak_ages', []),
                 'restart_gen': getattr(run_simulation, '_restart_gen', 0),
-
+                'cell_visit_counts': {f"{k[0]},{k[1]}": v for k, v in _cell_visit_counts.items()},
+                'niche_penalty_active': niche_penalty_active,
+                'niche_archive': [
+                    ([list(s) for s in kmers], fit)
+                    for kmers, fit in niche_archive
+                ],
             }, f)
+
 
         # ── Migration ──────────────────────────────────────────────────
 
