@@ -2503,7 +2503,14 @@ def run_simulation():
             # Restore restart gen anchor
             run_simulation._restart_gen = state.get('restart_gen', 0)
             run_simulation._historical_peak_ages = state.get('historical_peak_ages', [])
+            _restored_tag = state.get('run_tag', None)
+            if _restored_tag:
+                RUN_TAG = _restored_tag
+                print(f"🔄 Restored run tag: {RUN_TAG}")
+            _start_gen = state.get('gen', 0) + 1
             print(f"🔄 Restored state: gen {state.get('gen')}, stagnant={stagnant_generations}, best_avg={best_avg_so_far:.4f}")
+
+            run_simulation._start_gen = _start_gen
 
         else:
             print("⚠️ No run state found — starting stagnation tracking fresh.")
@@ -2545,8 +2552,11 @@ def run_simulation():
     global_best_peptide = None
 
     # One MAP-Elites grid per island to preserve island diversity
+
     map_elites_grid = {}
-    for gen in range(1, generations + 1):
+    _start_gen = getattr(run_simulation, '_start_gen', 1)
+    for gen in range(_start_gen, generations + 1):
+
         gen_start = datetime.now()
         print(f"\n🌱 Generation {gen}...")
 
@@ -2658,9 +2668,11 @@ def run_simulation():
             print("❌ Avg realism extremely low — stopping.")
             break
 
-        if gen == 1:
+
+        if not os.path.exists(trait_log_path):
             with open(trait_log_path, 'w') as f:
                 f.write("Generation,NetCharge,Hydrophobicity,AggregationRisk,Realism\n")
+
         with open(trait_log_path, 'a') as f:
             f.write(f"{gen},{avg_charge:.4f},{avg_hydro:.4f},{avg_agg:.4f},{avg_realism:.4f}\n")
 
@@ -3278,13 +3290,11 @@ def run_simulation():
         # Niche penalty countdown
         if niche_penalty_active > 0:
             niche_penalty_active -= 1
-
-
-        with open(FITNESS_STATS_FILE, 'a') as f:
-            if gen == 1: f.write("Generation,AvgFitness,MaxFitness,StdFitness,Top5Mean,StagnantGens\n")
-            f.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f},{top5_mean:.5f},{stagnant_generations}\n")
-
             
+        _write_fitness_header = not os.path.exists(FITNESS_STATS_FILE)
+        with open(FITNESS_STATS_FILE, 'a') as f:
+            if _write_fitness_header: f.write("Generation,AvgFitness,MaxFitness,StdFitness,Top5Mean,StagnantGens\n")
+            f.write(f"{gen},{avg_fitness:.5f},{max_fitness:.5f},{std_fitness:.5f},{top5_mean:.5f},{stagnant_generations}\n")
 
         islands = new_islands
         save_population([p for isl in islands for p in isl])
@@ -3298,6 +3308,7 @@ def run_simulation():
             ]
             json.dump({
                 'gen': gen,
+                'run_tag': RUN_TAG,
                 'best_fitness_so_far': best_fitness_so_far,
                 'best_avg_so_far': best_avg_so_far,
                 'stagnant_generations': stagnant_generations,
