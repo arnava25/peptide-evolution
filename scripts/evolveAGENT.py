@@ -2352,7 +2352,7 @@ def run_simulation():
     global world_model, naturalness_model, prophet_model
     global global_best_peptide, global_best_score
     global _stagnant_gens_global
-    global niche_archive, niche_penalty_active
+    global niche_archive, niche_penalty_active, _cell_visit_counts
     global population_size
 
     amp_model = keras.models.load_model('models/amp_model.keras', compile=False)
