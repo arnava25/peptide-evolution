@@ -2560,14 +2560,17 @@ def run_simulation():
         f.write(f"Population size: {population_size}, Generations: {generations}, Peptide length: {peptide_length}\n")
         f.write("Generation,Mutation Rate\n")
 
-
-    stagnant_generations = 0
-    best_fitness_so_far = 0
-    run_simulation._last_peak_fitness = 0.0
-    run_simulation._abandonment_fired = False
-    best_avg_so_far = 0
-    global_best_score = -np.inf
-    global_best_peptide = None
+    if not saved_pop:
+        stagnant_generations = 0
+        best_fitness_so_far = 0
+        run_simulation._last_peak_fitness = 0.0
+        run_simulation._abandonment_fired = False
+        best_avg_so_far = 0
+        global_best_score = -np.inf
+        global_best_peptide = None
+    else:
+        run_simulation._last_peak_fitness = best_fitness_so_far
+        run_simulation._abandonment_fired = False
 
     # One MAP-Elites grid per island to preserve island diversity
 
@@ -2714,9 +2717,9 @@ def run_simulation():
         emergency_chaos = (avg_sim > 0.78 and stagnant_generations > 40)
         low_diversity_flag = confident_chaos or emergency_chaos
 
-
+        _write_sim_header = not os.path.exists(SIMILARITY_LOG_PATH)
         with open(SIMILARITY_LOG_PATH, 'a') as sim_log:
-            if gen == 1: sim_log.write("Generation,Similarity\n")
+            if _write_sim_header: sim_log.write("Generation,Similarity\n")
             sim_log.write(f"{gen},{avg_sim:.4f}\n")
 
         log_novelty_stats(avg_sim, min_sim, max_sim, gen)
