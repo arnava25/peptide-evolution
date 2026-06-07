@@ -3001,7 +3001,6 @@ def run_simulation():
             salient_motifs = {k: v * 0.1 for k, v in salient_motifs.items() if v * 0.1 > 0.001}
             print(f"   Salient motifs decayed: {len(salient_motifs)} motifs retained at 10% strength.")
             # Decay cell visit counts so crowding penalties don't carry over to new peak
-            global _cell_visit_counts
             _cell_visit_counts = {k: max(1, v // 4) for k, v in _cell_visit_counts.items()}
             print(f"   Cell visit counts decayed to 25% — crowding penalties reset for new basin.")
 
