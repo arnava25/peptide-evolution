@@ -2728,7 +2728,8 @@ def run_simulation():
 
         # Niche clearing: if population has converged hard, archive the dominant cluster
         # and activate penalty to discourage re-convergence to the same scaffold
-        global niche_archive, niche_penalty_active
+        
+
         # Trigger on convergence OR prolonged stagnation
         stagnation_trigger = stagnant_generations > 200 and niche_penalty_active == 0
         similarity_trigger = avg_sim > 0.72 and niche_penalty_active == 0
