@@ -1085,7 +1085,8 @@ def historical_peak_penalty(peptide: str) -> float:
             decay = 1.0  # no age info, full penalty
 
         if sim > 0.40:
-            penalty = 0.2 + 0.8 * (1.0 - decay)  # decays from 0.2 → 1.0  (was 0.5)
+            penalty = 0.05 + 0.95 * (1.0 - decay)  # starts at 0.05 — much harsher
+
 
         else:
             penalty = 0.4 + 0.6 * (1.0 - decay)  # decays from 0.4 → 1.0  (was 0.75)
