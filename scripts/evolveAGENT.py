@@ -2896,11 +2896,15 @@ def run_simulation():
             for s in top_seqs[:20]:
                 dominant_kmers.update(kmer_set(s, ARCHIVE_K))
             niche_archive.append((dominant_kmers, float(generation_df['Fitness_Score'].max())))
-            niche_penalty_active = 300
+            niche_penalty_active = 150
 
             with open(PEAK_EVENTS_FILE, 'a') as f:
                 f.write(f"{gen},abandonment,{generation_df['Fitness_Score'].max():.4f},{len(run_simulation._historical_peaks)},adaptive abandonment rate={_improvement_rate:.6f}\n")
-            print(f"   Niche penalty activated for 300 gens.")
+
+            print(f"   Niche penalty activated for 150 gens.")
+            best_fitness_so_far = 0.0
+            best_avg_so_far = 0.0
+            print(f"   Fitness tracking reset — run must re-earn fitness in new basin.")
             print(f"   Fitness will DROP — this is intentional. Finding new basin...\n")
 
 
