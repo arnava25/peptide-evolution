@@ -565,6 +565,14 @@ def build_figure(files, window=0):
     fig.add_artist(plt.Line2D([0.03, 0.97], [0.952, 0.952],
                                transform=fig.transFigure,
                                color=GRID_CLR, linewidth=0.8))
+
+    # Force all axes to span the full window range
+    if window > 0 and current_gen > 0:
+        x_min = current_gen - window
+        x_max = current_gen
+        for ax in [ax_fit, ax_mut, ax_sim, ax_traits, ax_stag, ax_pwm, ax_action]:
+            ax.set_xlim(x_min, x_max)
+
     return fig
 
 
